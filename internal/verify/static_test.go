@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/dhruv29/vajra/internal/finding"
+	"github.com/dhruv29/vajra/internal/scope"
 )
 
 func staticFinding() finding.Finding {
@@ -89,5 +90,30 @@ func TestReproduceStageWithoutABudgetStillRuns(t *testing.T) {
 	stage := ReproduceStage{Reproducer: r, Attempts: 2}
 	if outcome, _ := stage.Check(context.Background(), staticFinding()); outcome != finding.Pass || r.calls != 2 {
 		t.Fatalf("outcome = %s, calls = %d", outcome, r.calls)
+	}
+}
+
+func TestPortScopeStage(t *testing.T) {
+	policy, err := scope.New(scope.Config{Hosts: []string{"app.test"}, Ports: []int{443, 5432}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stage := PortScopeStage{Policy: policy}
+	cases := map[string]finding.Outcome{
+		"tcp://app.test:5432":  finding.Pass,
+		"tcp://app.test:22":    finding.Fail, // port not in scope
+		"tcp://other.test:443": finding.Fail,
+		"https://app.test":     finding.Fail, // not a network target
+		"tcp://app.test":       finding.Fail,
+		"tcp://:443":           finding.Fail,
+		"tcp://app.test:0":     finding.Fail,
+	}
+	for target, want := range cases {
+		if got, reason := stage.Check(context.Background(), finding.Finding{Target: target}); got != want || reason == "" {
+			t.Errorf("%s: outcome = %s (%s); want %s", target, got, reason, want)
+		}
+	}
+	if stage.Name() != "scope" || stage.FailStatus() != finding.OutOfScope {
+		t.Fatal("stage identity is wrong")
 	}
 }

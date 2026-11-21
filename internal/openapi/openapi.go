@@ -91,7 +91,8 @@ func Parse(r io.Reader) (Document, error) {
 	if err := checkVersion(root); err != nil {
 		return Document{}, err
 	}
-	p := parser{root: root}
+	work := maxSchemaVisits
+	p := parser{root: root, work: &work}
 	return Document{
 		Title:      text(object(root["info"])["title"]),
 		Servers:    servers(root),
@@ -148,13 +149,20 @@ func servers(root map[string]any) []string {
 // parser reads operations out of a decoded document.
 type parser struct {
 	root map[string]any
+	// work is what is left of maxSchemaVisits. It is shared by every copy of
+	// the parser, so one budget covers the whole document.
+	work *int
 }
 
 // operations lists every operation, sorted by path then method, and gives
 // each an ID no other operation has.
 func (p parser) operations() []Operation {
 	operations := []Operation{}
-	for path, item := range object(p.root["paths"]) {
+	paths := object(p.root["paths"])
+	// Paths are visited in order so that, when the work budget runs out, the
+	// same operations lose their body examples every time.
+	for _, path := range sortedKeys(paths) {
+		item := paths[path]
 		if !strings.HasPrefix(path, "/") {
 			continue // an extension field such as x-internal
 		}

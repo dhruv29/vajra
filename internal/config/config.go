@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -55,6 +56,26 @@ type Sandbox struct {
 	Network string `json:"network"`
 	// ProxyURL is the egress gate as seen from that network.
 	ProxyURL string `json:"proxy_url"`
+	// SocksAddr is the gate's SOCKS5 front end as seen from that network, as
+	// host:port. It is needed only for port discovery.
+	SocksAddr string `json:"socks_addr"`
+}
+
+// GraphQL configures checks on a GraphQL endpoint.
+type GraphQL struct {
+	Endpoint string `json:"endpoint"`
+	// RequiresAuth says the endpoint is expected to refuse anonymous queries.
+	RequiresAuth bool `json:"requires_auth"`
+}
+
+// Ports configures port discovery: which hosts and ports to try, and which of
+// those ports are expected to be open. An open port outside Expected is
+// reported. Only ports listed in the scope can be tried at all.
+type Ports struct {
+	Hosts          []string `json:"hosts"`
+	Ports          []int    `json:"ports"`
+	Expected       []int    `json:"expected"`
+	TimeoutSeconds int      `json:"timeout_seconds"`
 }
 
 // Nuclei configures the nuclei scanner.
@@ -220,6 +241,8 @@ type Config struct {
 	Agent    *Agent               `json:"agent"`
 	Recon    *Recon               `json:"recon"`
 	Notify   *Notify              `json:"notify"`
+	GraphQL  *GraphQL             `json:"graphql"`
+	Ports    *Ports               `json:"ports"`
 }
 
 // Load reads and validates the configuration at path.
@@ -281,12 +304,12 @@ func (c Config) hasChecks() bool { return c.Auth != nil && len(c.Auth.AccessChec
 
 // IsLive reports whether the run tests anything over the network.
 func (c Config) IsLive() bool {
-	return len(c.Targets) > 0 || c.hasChecks() || c.API != nil || c.Recon != nil
+	return len(c.Targets) > 0 || c.hasChecks() || c.API != nil || c.Recon != nil || c.GraphQL != nil || c.Ports != nil
 }
 
 // NeedsProbe reports whether the run uses Vajra's own HTTP client.
 func (c Config) NeedsProbe() bool {
-	return c.hasChecks() || c.API != nil || c.Crawl != nil || c.Agent != nil
+	return c.hasChecks() || c.API != nil || c.Crawl != nil || c.Agent != nil || c.GraphQL != nil || c.Ports != nil
 }
 
 // needsScope reports whether the run names anything reachable.
@@ -313,7 +336,9 @@ func (c Config) validate() (*scope.Policy, error) {
 			return nil, fmt.Errorf("config: %w", err)
 		}
 	}
-	checks := []func(*scope.Policy) error{c.validateLive, c.validateAuth, c.validateDiscovery, c.validateAPI, c.validateAgent, c.validateRefuter}
+	checks := []func(*scope.Policy) error{
+		c.validateLive, c.validateAuth, c.validateDiscovery, c.validateAPI, c.validateAgent, c.validateRefuter, c.validateNetwork,
+	}
 	for _, check := range checks {
 		if err := check(policy); err != nil {
 			return nil, err
@@ -437,6 +462,36 @@ func (c Config) validateAPI(policy *scope.Policy) error {
 		return fmt.Errorf("config: api.spec %q must be an absolute path to an OpenAPI JSON file", c.API.Spec)
 	}
 	return checkInScope(policy, "api.base_url", c.API.BaseURL)
+}
+
+// validateNetwork checks the GraphQL and port-discovery sections.
+func (c Config) validateNetwork(policy *scope.Policy) error {
+	if c.GraphQL != nil {
+		if err := checkInScope(policy, "graphql.endpoint", c.GraphQL.Endpoint); err != nil {
+			return err
+		}
+	}
+	if c.Ports == nil {
+		return nil
+	}
+	p := c.Ports
+	if len(p.Hosts) == 0 || len(p.Ports) == 0 || p.TimeoutSeconds <= 0 {
+		return errors.New("config: ports needs hosts, ports and a positive timeout_seconds")
+	}
+	if _, _, err := net.SplitHostPort(c.Sandbox.SocksAddr); err != nil {
+		return fmt.Errorf("config: ports needs sandbox.socks_addr as host:port, the gate's SOCKS5 address on the task network")
+	}
+	for _, host := range p.Hosts {
+		for _, port := range p.Ports {
+			if port < 1 || port > 65535 {
+				return fmt.Errorf("config: ports: %d is not a port", port)
+			}
+			if err := policy.CheckTarget(host, uint16(port)); err != nil {
+				return fmt.Errorf("config: ports: %s:%d is outside the configured scope, so the gate would refuse it: %w", host, port, err)
+			}
+		}
+	}
+	return nil
 }
 
 func (c Config) validateAgent(*scope.Policy) error {

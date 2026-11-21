@@ -9,8 +9,9 @@ import (
 )
 
 const (
-	// maskPrefixChars is how much of a secret stays readable: enough to tell
-	// which credential it is, not enough to use it.
+	// maskPrefixChars is how much of a provider-tagged secret stays readable:
+	// the provider's public prefix, which tells which credential it is and
+	// nothing about its value. Other secrets show no characters at all.
 	maskPrefixChars = 4
 	// contextLines is how many lines are shown on each side of a finding.
 	contextLines = 3
@@ -18,10 +19,15 @@ const (
 	maxLineChars = 300
 )
 
-// mask returns the form of a secret that is safe to store and show: its first
-// characters and a count of the rest. A value no longer than the prefix is
-// hidden completely.
+// mask returns the form of a secret that is safe to store and show: only how
+// long it was. Even a few characters of a password narrow a guess.
 func mask(value string) string {
+	return fmt.Sprintf("…[masked %d chars]", utf8.RuneCountInString(value))
+}
+
+// maskTagged is mask for a value that starts with a provider's public tag,
+// which stays readable. A value no longer than the tag is hidden completely.
+func maskTagged(value string) string {
 	chars := utf8.RuneCountInString(value)
 	if chars <= maskPrefixChars {
 		return fmt.Sprintf("…[masked %d chars]", chars)
@@ -31,7 +37,8 @@ func mask(value string) string {
 }
 
 // maskSpans returns text with each span replaced by its masked form.
-// Overlapping spans are masked as one, so no part of either is left behind.
+// Overlapping spans are masked as one, so no part of either is left behind;
+// the merged span keeps a readable tag only when every part of it has one.
 func maskSpans(text string, spans []span) string {
 	if len(spans) == 0 {
 		return text
@@ -45,9 +52,10 @@ func maskSpans(text string, spans []span) string {
 		merged := sorted[i]
 		for i++; i < len(sorted) && sorted[i].start <= merged.end; i++ {
 			merged.end = max(merged.end, sorted[i].end)
+			merged.tagged = merged.tagged && sorted[i].tagged
 		}
 		b.WriteString(text[pos:merged.start])
-		b.WriteString(mask(text[merged.start:merged.end]))
+		b.WriteString(merged.mask(text))
 		pos = merged.end
 	}
 	b.WriteString(text[pos:])

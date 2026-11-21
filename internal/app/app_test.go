@@ -59,9 +59,11 @@ type scriptedRunner struct {
 	scanOutput   string
 	reproducible map[string]bool
 	staticOutput string
-	staticSpecs  []sandbox.Spec
-	runs         int
-	err          error
+	// staticSequence, when set, answers successive code-analysis runs in order.
+	staticSequence []string
+	staticSpecs    []sandbox.Spec
+	runs           int
+	err            error
 }
 
 func (r *scriptedRunner) Run(_ context.Context, spec sandbox.Spec) (sandbox.Result, error) {
@@ -71,7 +73,11 @@ func (r *scriptedRunner) Run(_ context.Context, spec sandbox.Spec) (sandbox.Resu
 	}
 	if spec.Entrypoint == "semgrep" {
 		r.staticSpecs = append(r.staticSpecs, spec)
-		return sandbox.Result{Stdout: []byte(r.staticOutput)}, nil
+		out := r.staticOutput
+		if len(r.staticSequence) > 0 {
+			out, r.staticSequence = r.staticSequence[0], r.staticSequence[1:]
+		}
+		return sandbox.Result{Stdout: []byte(out)}, nil
 	}
 	if slices.Contains(spec.Argv, "/opt/vajra/canary.yaml") {
 		return sandbox.Result{Stdout: []byte(line("vajra-canary", "info", "https://app.test"))}, nil

@@ -490,10 +490,14 @@ func TestScanAsSendsTheAccountToTheScannerAndKeepsItOutOfTheReport(t *testing.T)
 		t.Fatalf("scanner runs = %d; want the scan and two re-tests", len(runner.scanSpecs))
 	}
 	for _, spec := range runner.scanSpecs {
+		// The account reaches the scanner on standard input. On the command
+		// line it would be readable by every local user.
 		for _, header := range []string{"Authorization: " + userCredential, "X-Tenant-Key: tenant-credential-3"} {
-			at := slices.Index(spec.Argv, header)
-			if at < 1 || spec.Argv[at-1] != "-header" {
-				t.Fatalf("scanner arguments %v lack -header %q", spec.Argv, header)
+			if !strings.Contains(string(spec.Stdin), header) {
+				t.Fatalf("scanner input %q lacks %q", spec.Stdin, header)
+			}
+			if strings.Contains(strings.Join(spec.Argv, " "), header) {
+				t.Fatalf("a credential is on the scanner's command line: %v", spec.Argv)
 			}
 		}
 	}

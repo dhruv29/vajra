@@ -471,9 +471,9 @@ func TestCrawlCollectsFormsAndFields(t *testing.T) {
 			t.Errorf("form %d = %+v; want %+v", i, form, want[i])
 		}
 	}
-	wantLinks := []string{origin + "/dir/page", origin + "/dir/search", origin + "/login?lang=en&next=%2F", origin + "/unclosed"}
+	wantLinks := []string{origin + "/dir/page", origin + "/dir/search", origin + "/unclosed"}
 	if !slices.Equal(page.Links, wantLinks) {
-		t.Fatalf("links = %v; want the in-scope form actions %v", page.Links, wantLinks)
+		t.Fatalf("links = %v; want the in-scope GET form actions %v", page.Links, wantLinks)
 	}
 }
 
@@ -679,5 +679,71 @@ func TestCrawlLeavesOutOfScopeStartURLsOut(t *testing.T) {
 	}
 	if got := site.fetched(); !slices.Equal(got, []string{origin + "/"}) || len(result.Pages) != 1 {
 		t.Fatalf("fetched = %v", got)
+	}
+}
+
+func TestCrawlDoesNotFetchTheActionOfAPOSTForm(t *testing.T) {
+	site := &fakeSite{pages: map[string]probe.Response{
+		origin + "/": htmlPage(`<form action="/transfer" method="post"><input name="amount"></form>` +
+			`<form action="/search"><input name="q"></form>`),
+	}}
+
+	result, err := Crawl(context.Background(), site, []string{origin + "/"}, options(10, 1))
+
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fetched := site.fetched(); !slices.Equal(fetched, []string{origin + "/", origin + "/search"}) {
+		t.Fatalf("fetched = %v; the POST form's action must not be requested", fetched)
+	}
+	forms := result.Pages[0].Forms
+	if len(forms) != 2 || forms[0].Action != origin+"/transfer" || forms[0].Method != "POST" {
+		t.Fatalf("forms = %+v; the POST form must still be listed", forms)
+	}
+}
+
+func TestCrawlListsButDoesNotFetchStateChangingLinks(t *testing.T) {
+	risky := []string{
+		"/logout", "/Account/Sign-Out", "/session?action=delete", "/api/tokens/7?Revoke=1",
+		"/user_delete", "/logout.php", "/settings/reset", "/logout",
+	}
+	safe := []string{"/presets", "/removed-items-report", "/dashboard?tab=settings", "/canceled"}
+	site := &fakeSite{pages: map[string]probe.Response{origin + "/": htmlPage(links(append(risky, safe...)...))}}
+
+	result, err := Crawl(context.Background(), site, []string{origin + "/"}, options(50, 1))
+
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantSkipped := []string{
+		origin + "/Account/Sign-Out", origin + "/api/tokens/7?Revoke=1", origin + "/logout",
+		origin + "/logout.php", origin + "/session?action=delete", origin + "/settings/reset", origin + "/user_delete",
+	}
+	if !slices.Equal(result.Skipped, wantSkipped) {
+		t.Fatalf("skipped = %v; want %v", result.Skipped, wantSkipped)
+	}
+	fetched := site.fetched()
+	for _, skipped := range wantSkipped {
+		if slices.Contains(fetched, skipped) {
+			t.Errorf("fetched %s", skipped)
+		}
+		if !slices.Contains(result.Pages[0].Links, skipped) {
+			t.Errorf("%s is not listed in the page's links", skipped)
+		}
+	}
+	for _, path := range safe {
+		if !slices.Contains(fetched, origin+path) {
+			t.Errorf("did not fetch the ordinary link %s", path)
+		}
+	}
+}
+
+func TestCrawlReportsNoSkippedLinksAsAnEmptyList(t *testing.T) {
+	site := &fakeSite{pages: map[string]probe.Response{origin + "/": htmlPage(links("/a"))}}
+
+	result, err := Crawl(context.Background(), site, []string{origin + "/"}, options(10, 1))
+
+	if err != nil || result.Skipped == nil || len(result.Skipped) != 0 {
+		t.Fatalf("skipped = %#v, err = %v; want an empty list", result.Skipped, err)
 	}
 }

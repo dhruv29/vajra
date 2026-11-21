@@ -3,8 +3,10 @@ package openapi
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -621,7 +623,7 @@ func TestRequestsJoinsTheBaseURLWithoutDoublingSlashes(t *testing.T) {
 		{"host only", "http://api.test:8080", "/orders", "http://api.test:8080/orders"},
 		{"host with a slash", "http://api.test/", "/", "http://api.test/"},
 		{"query and fragment on the base are dropped", "https://api.test/v1?key=1#top", "/orders", "https://api.test/v1/orders"},
-		{"path without a leading slash", " https://api.test/v1 ", "orders", "https://api.test/v1/orders"},
+		{"base with surrounding spaces", " https://api.test/v1 ", "/orders", "https://api.test/v1/orders"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -705,6 +707,118 @@ func TestStringifyRendersExampleValues(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			if got := stringify(tt.value); got != tt.want {
 				t.Fatalf("stringify(%v) = %q; want %q", tt.value, got, tt.want)
+			}
+		})
+	}
+}
+
+// parseWithin runs Parse on spec and fails when it takes longer than limit,
+// so a document that makes Parse do exponential work fails the test instead
+// of hanging it.
+func parseWithin(t *testing.T, spec string, limit time.Duration) Document {
+	t.Helper()
+	done := make(chan Document, 1)
+	go func() {
+		doc, err := Parse(strings.NewReader(spec))
+		if err != nil {
+			t.Error(err)
+		}
+		done <- doc
+	}()
+	select {
+	case doc := <-done:
+		return doc
+	case <-time.After(limit):
+		t.Fatalf("Parse did not return within %v", limit)
+		return Document{}
+	}
+}
+
+func TestParseBoundsAllOfFanOut(t *testing.T) {
+	for _, n := range []int{3, 8} {
+		t.Run(strconv.Itoa(n), func(t *testing.T) {
+			parts := strings.TrimSuffix(strings.Repeat(`{"$ref":"#/components/schemas/A"},`, n), ",")
+			spec := withSchema(`{"$ref":"#/components/schemas/A"}`,
+				`{"A":{"allOf":[`+parts+`],"properties":{"x":{"type":"string"}}}}`)
+
+			doc := parseWithin(t, spec, 5*time.Second)
+
+			if len(doc.Operations) != 1 || !doc.Operations[0].HasBody {
+				t.Fatalf("operations = %+v", doc.Operations)
+			}
+		})
+	}
+}
+
+func TestParseBoundsWideSelfReferencingObjects(t *testing.T) {
+	const width = 5000
+	properties := make([]string, 0, width)
+	for i := range width {
+		properties = append(properties, fmt.Sprintf(`"p%04d":{"$ref":"#/components/schemas/W"}`, i))
+	}
+	spec := withSchema(`{"$ref":"#/components/schemas/W"}`,
+		`{"W":{"type":"object","properties":{`+strings.Join(properties, ",")+`}}}`)
+
+	doc := parseWithin(t, spec, 5*time.Second)
+
+	var body map[string]any
+	if err := json.Unmarshal([]byte(doc.Operations[0].BodyExample), &body); err != nil {
+		t.Fatalf("body example %q: %v", doc.Operations[0].BodyExample, err)
+	}
+	if len(body) > maxExampleProperties {
+		t.Fatalf("body has %d properties; want at most %d", len(body), maxExampleProperties)
+	}
+}
+
+func TestParseCapsPropertiesPerSynthesisedObject(t *testing.T) {
+	properties := make([]string, 0, 2*maxExampleProperties)
+	for i := range 2 * maxExampleProperties {
+		properties = append(properties, fmt.Sprintf(`"p%03d":{"type":"integer"}`, i))
+	}
+	doc := parseSpec(t, withSchema(`{"properties":{`+strings.Join(properties, ",")+`}}`, `{}`))
+
+	var body map[string]any
+	if err := json.Unmarshal([]byte(doc.Operations[0].BodyExample), &body); err != nil {
+		t.Fatal(err)
+	}
+	if len(body) != maxExampleProperties || body["p000"] == nil || body[fmt.Sprintf("p%03d", maxExampleProperties)] != nil {
+		t.Fatalf("body has %d properties; want the first %d by name", len(body), maxExampleProperties)
+	}
+}
+
+func TestRequestsSkipsPathTemplatesThatAreNotPlainPaths(t *testing.T) {
+	for _, path := range []string{"orders", "/a?admin=1", "/a#frag", "/a b", "/a\tb", "/a\\b", "/a\x00b", "/a\x7fb", ""} {
+		t.Run(path, func(t *testing.T) {
+			doc := Document{Operations: []Operation{{ID: "op", Method: "GET", Path: path}}}
+
+			requests, skipped := doc.Requests(RequestOptions{BaseURL: "https://api.test"})
+
+			want := []Skipped{{"op", fmt.Sprintf(reasonBadPathTemplate, path)}}
+			if len(requests) != 0 || !slices.Equal(skipped, want) {
+				t.Fatalf("requests = %+v, skipped = %+v", requests, skipped)
+			}
+		})
+	}
+}
+
+func TestRequestsSkipsDotAndEmptyPathParameterValues(t *testing.T) {
+	tests := []struct {
+		name  string
+		value string
+		want  string
+	}{
+		{"dot", ".", `the value of path parameter "id" would change the route`},
+		{"dot dot", "..", `the value of path parameter "id" would change the route`},
+		{"empty", "", `no value for path parameter "id"`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			doc := Document{Operations: []Operation{{ID: "op", Method: "GET", Path: "/users/{id}/profile"}}}
+
+			requests, skipped := doc.Requests(RequestOptions{BaseURL: "https://api.test", Params: map[string]string{"id": tt.value}})
+
+			if len(requests) != 0 || !slices.Equal(skipped, []Skipped{{"op", tt.want}}) {
+				t.Fatalf("requests = %+v, skipped = %+v", requests, skipped)
 			}
 		})
 	}

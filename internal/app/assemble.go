@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/dhruv29/vajra/internal/access"
@@ -14,10 +16,12 @@ import (
 	"github.com/dhruv29/vajra/internal/budget"
 	"github.com/dhruv29/vajra/internal/config"
 	"github.com/dhruv29/vajra/internal/finding"
+	"github.com/dhruv29/vajra/internal/graphql"
 	"github.com/dhruv29/vajra/internal/llm"
 	"github.com/dhruv29/vajra/internal/nuclei"
 	"github.com/dhruv29/vajra/internal/openapi"
 	"github.com/dhruv29/vajra/internal/osv"
+	"github.com/dhruv29/vajra/internal/portscan"
 	"github.com/dhruv29/vajra/internal/probe"
 	"github.com/dhruv29/vajra/internal/record"
 	"github.com/dhruv29/vajra/internal/refute"
@@ -48,19 +52,31 @@ type run struct {
 	// scanHeaders are the credentials of the account the scanner uses.
 	scanHeaders   map[string]string
 	secretHeaders []string
+	// secretValues are the credential values of every account, scrubbed from
+	// everything that is stored, shown or sent to a model.
+	secretValues []string
+	// accountOrigins are the scheme://host:port of the configured targets.
+	// The scanning account's credentials are sent there and nowhere else.
+	accountOrigins map[string]bool
 
-	fetcher  probe.Fetcher
-	nuclei   *nuclei.Scanner
-	checker  *access.Checker
-	api      *apitest.Tester
-	explorer *agent.Explorer
-	semgrep  *semgrep.Scanner
-	osv      *osvReproducer
-	model    llm.Sender
+	fetcher probe.Fetcher
+	// nuclei scans as the configured account; nucleiAnon, when set, scans
+	// hosts the account was not issued for, without credentials.
+	nuclei     *nuclei.Scanner
+	nucleiAnon *nuclei.Scanner
+	checker    *access.Checker
+	api        *apitest.Tester
+	graphql    *graphql.Tester
+	ports      *portscan.Runner
+	explorer   *agent.Explorer
+	semgrep    *semgrep.Scanner
+	osv        *osvReproducer
+	model      llm.Sender
 
 	dynamicPipeline    *verify.Pipeline
 	staticPipeline     *verify.Pipeline
 	dependencyPipeline *verify.Pipeline
+	networkPipeline    *verify.Pipeline
 }
 
 func assemble(cfg config.Config, policy *scope.Policy, deps Deps) (*run, error) {
@@ -75,7 +91,13 @@ func assemble(cfg config.Config, policy *scope.Policy, deps Deps) (*run, error) 
 	// Every sandbox run is charged to the budget and cut off at the run's
 	// remaining time, wherever in the code it is started.
 	deps.Runner = budgetRunner{inner: deps.Runner, budget: b}
-	r := &run{cfg: cfg, deps: deps, policy: policy, budget: b, targets: append([]string{}, cfg.Targets...)}
+	r := &run{
+		cfg: cfg, deps: deps, policy: policy, budget: b,
+		targets: append([]string{}, cfg.Targets...), accountOrigins: map[string]bool{},
+	}
+	for _, target := range cfg.Targets {
+		r.accountOrigins[originOf(target)] = true
+	}
 	refuteStage, err := r.refuteStage()
 	if err != nil {
 		return nil, err
@@ -199,7 +221,12 @@ func (r *run) addLive(refuteStage verify.RefuteStage) error {
 		if err := r.nuclei.Validate(); err != nil {
 			return err
 		}
-		router[nuclei.Source] = r.nuclei
+		if len(r.scanHeaders) > 0 {
+			anon := *r.nuclei
+			anon.Headers = nil
+			r.nucleiAnon = &anon
+		}
+		router[nuclei.Source] = verify.Reproducer(scannerByOrigin{run: r})
 	}
 	if cfg.NeedsProbe() {
 		if err := r.addProbeUsers(router); err != nil {
@@ -231,8 +258,12 @@ func (r *run) resolveIdentities() error {
 			if value == "" {
 				return fmt.Errorf("app: identity %q needs the %s environment variable", id.Name, env)
 			}
+			if strings.ContainsAny(value, "\r\n\x00") {
+				return fmt.Errorf("app: the value of %s for identity %q contains a line break, which a header cannot carry", env, id.Name)
+			}
 			headers[header] = value
 			secret[header] = true
+			r.secretValues = append(r.secretValues, value)
 		}
 		r.identities = append(r.identities, access.Identity{Name: id.Name, Headers: headers})
 		if id.Name == r.cfg.Auth.ScanAs {
@@ -272,6 +303,27 @@ func (r *run) addProbeUsers(router verify.SourceRouter) error {
 			return err
 		}
 	}
+	if cfg.GraphQL != nil {
+		// The account's credentials go to the endpoint only when it is on one
+		// of the hosts the account was issued for.
+		var headers map[string]string
+		if r.accountOrigins[originOf(cfg.GraphQL.Endpoint)] {
+			headers = r.scanHeaders
+		}
+		var err error
+		r.graphql, err = graphql.New(r.fetcher, graphql.Options{
+			Endpoint: cfg.GraphQL.Endpoint, Headers: headers, RequiresAuth: cfg.GraphQL.RequiresAuth,
+		})
+		if err != nil {
+			return err
+		}
+		router[graphql.Source] = r.graphql
+	}
+	if cfg.Ports != nil {
+		if err := r.addPorts(); err != nil {
+			return err
+		}
+	}
 	if cfg.Agent != nil {
 		// The explorer is created when it runs, because its briefing depends
 		// on what the earlier stages found. Its reports are re-tested by it.
@@ -283,6 +335,26 @@ func (r *run) addProbeUsers(router verify.SourceRouter) error {
 		}})
 	}
 	return nil
+}
+
+// addPorts prepares port discovery. An open port is a fact that a second
+// connection attempt checks completely, so its pipeline has no review stage.
+func (r *run) addPorts() error {
+	cfg := r.cfg
+	r.ports = &portscan.Runner{
+		Sandbox: r.deps.Runner, Image: cfg.Probe.Image, Network: cfg.Sandbox.Network, Gate: cfg.Sandbox.SocksAddr,
+		Timeout: time.Duration(cfg.Ports.TimeoutSeconds) * time.Second,
+		Hosts:   cfg.Ports.Hosts, Ports: cfg.Ports.Ports, Expected: cfg.Ports.Expected,
+	}
+	if err := r.ports.Validate(); err != nil {
+		return err
+	}
+	var err error
+	r.networkPipeline, err = verify.NewPipeline(r.deps.Now,
+		verify.PortScopeStage{Policy: r.policy},
+		verify.ReproduceStage{Reproducer: verify.SourceRouter{portscan.Source: r.ports}, Attempts: cfg.Verify.ReproduceAttempts},
+	)
+	return err
 }
 
 func (r *run) addAPI(router verify.SourceRouter) error {
@@ -299,6 +371,45 @@ func (r *run) addAPI(router verify.SourceRouter) error {
 	}
 	router[apitest.Source] = r.api
 	return nil
+}
+
+// originOf names the scheme, host and port of a URL, with the port always
+// written out, or "" for anything that is not an http(s) URL.
+func originOf(rawURL string) string {
+	host, port, err := verify.TargetHostPort(rawURL)
+	if err != nil {
+		return ""
+	}
+	scheme := "https"
+	if strings.HasPrefix(strings.ToLower(rawURL), "http://") {
+		scheme = "http"
+	}
+	return scheme + "://" + strings.ToLower(host) + ":" + strconv.Itoa(int(port))
+}
+
+// accountMayReach reports whether the scanning account's credentials may be
+// sent to a URL: only to the targets the operator listed, never to hosts that
+// discovery or a link turned up.
+func (r *run) accountMayReach(rawURL string) bool {
+	return len(r.scanHeaders) == 0 || r.accountOrigins[originOf(rawURL)]
+}
+
+// scannerFor picks the scanner that may be used against a URL.
+func (r *run) scannerFor(rawURL string) *nuclei.Scanner {
+	if r.nucleiAnon != nil && !r.accountOrigins[originOf(rawURL)] {
+		return r.nucleiAnon
+	}
+	return r.nuclei
+}
+
+// scannerByOrigin re-tests a finding with the scanner that found it: with the
+// account's credentials only on the hosts the account was issued for.
+type scannerByOrigin struct {
+	run *run
+}
+
+func (s scannerByOrigin) Reproduce(ctx context.Context, f finding.Finding) (bool, error) {
+	return s.run.scannerFor(f.Target).Reproduce(ctx, f)
 }
 
 // lateReproducer forwards to a reproducer that does not exist yet when the
@@ -347,13 +458,14 @@ func (r *run) addSource(refuteStage verify.RefuteStage) error {
 		r.osv = &osvReproducer{
 			client:   osv.NewClient(osv.Options{BaseURL: r.deps.OSVBaseURL, HTTP: r.deps.ModelClient}),
 			packages: map[string]osv.Package{},
+			budget:   r.budget,
 		}
 		// A dependency finding states a fact: this version is pinned and this
 		// advisory covers it. Looking it up again is the whole check, so there
 		// is no review stage; whether the flaw is reachable is not claimed.
 		r.dependencyPipeline, err = verify.NewPipeline(r.deps.Now,
 			verify.PackageEvidenceStage{},
-			verify.ReproduceStage{Reproducer: r.osv, Attempts: staticReproduceAttempts},
+			verify.ReproduceStage{Reproducer: verify.SourceRouter{osv.Source: r.osv}, Attempts: staticReproduceAttempts},
 		)
 	}
 	return err
@@ -372,9 +484,15 @@ func (s secretsReproducer) Reproduce(_ context.Context, f finding.Finding) (bool
 type osvReproducer struct {
 	client   *osv.Client
 	packages map[string]osv.Package
+	budget   *budget.Budget
 }
 
 func (o *osvReproducer) Reproduce(ctx context.Context, f finding.Finding) (bool, error) {
+	// A lookup after the budget is spent would confirm a finding on a run
+	// that was supposed to have stopped.
+	if err := o.budget.Check(); err != nil {
+		return false, err
+	}
 	if len(f.Evidence.Extracted) == 0 {
 		return false, errors.New("the finding does not name a package")
 	}

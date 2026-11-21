@@ -119,16 +119,16 @@ The gates and the verification pipeline. Nothing else is safe to build first.
 | 5 | Code and live findings corroborate each other; code findings are given to the explorer as leads to demonstrate live | done |
 | 6 | Test accounts, scanning as an account, access rules checked across every account | done |
 | 7 | Link-following crawler behind the gate | done; a recording proxy and browser-driven crawling are not built |
-| 8 | OpenAPI import; protected operations requested without credentials | done; GraphQL and business-logic checks are not built |
+| 8 | OpenAPI import; protected operations requested without credentials; GraphQL schema and authentication checks | done; business-logic checks are not built |
 
 ### Phase 3: autonomy under gates
 
 | Loop | Delivers | State |
 |---|---|---|
 | 9 | Explorer limited to three gated tools, with evidence-bound reports and a step timeline | done |
-| 10 | Sub-domain discovery under wildcard scope; SOCKS5 front end on the gate | done; no port scanner uses the SOCKS5 gate yet |
+| 10 | Sub-domain discovery under wildcard scope; SOCKS5 front end on the gate; port discovery through it | done |
 | 11 | Attack chains across confirmed findings | done |
-| 12 | Terminal approval for requests that could change data; stop command; timeline in the run | done; pause and resume are not built |
+| 12 | Terminal approval showing the whole request; pause, resume and stop; timeline in the run | done |
 
 ### Phase 4: beyond the state of the art
 
@@ -172,6 +172,34 @@ tested:
 Since then: leftover containers can be removed with `vajra cleanup`, and base
 images are pinned by digest. Still open from that review: wildcards over
 public suffixes such as `*.co.uk` are accepted.
+
+### Second review
+
+Three reviewers went through everything added after the first review. Fixed
+with tests:
+
+- Credentials are removed by value from everything stored or shown to a
+  model, reach the scanner on standard input instead of a command line, and
+  go only to the targets the operator listed.
+- The explorer refuses method-override tricks, shows the operator the whole
+  request before a risky one, accepts proof only from the response body, and
+  can carry out only a few tool calls per turn.
+- A hostile API description can no longer hang the parser.
+- Secrets near a reported one are masked in its context; long private keys
+  are masked to the end.
+- The SOCKS5 front end survives connection floods; the crawler does not
+  follow links that would change state.
+- A patch is called verified only if it changes real code inside the shown
+  window, the rule fired before it and no new rule fires after it.
+- Dependency lookups respect the budget; an interrupted run is an error;
+  unreadable scanner output is reported instead of dropped.
+- A response cut off mid-body is not an answer, and a target cannot pose as
+  the gate over HTTPS.
+
+Left as they are, by decision: findings from code and live testing are
+linked by service and weakness class, not by endpoint; blast-radius
+classification trusts the scanner's own labels; a dependency or open-port
+finding is confirmed by a repeated lookup alone, because it states a fact.
 
 ## Open questions
 

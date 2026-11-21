@@ -48,6 +48,8 @@ type Deps struct {
 	Approve agent.Approver
 	// Stop is polled by the agent between steps; true ends it cleanly.
 	Stop func() bool
+	// Pause is polled by the agent between steps; while true, it waits.
+	Pause func() bool
 	// ReadFile reads the API description. Nil means os.ReadFile.
 	ReadFile func(path string) ([]byte, error)
 	// ModelBaseURL, ModelClient and OSVBaseURL override endpoints in tests.
@@ -72,7 +74,18 @@ func Scan(ctx context.Context, cfg config.Config, policy *scope.Policy, deps Dep
 	if err != nil {
 		return Report{}, err
 	}
-	return r.verify(ctx, candidates), nil
+	return r.finish(ctx, r.verify(ctx, candidates))
+}
+
+// finish refuses to pass off an interrupted run as a result. Findings that
+// were not verified before the interruption are marked unconfirmed, and a
+// report in which confirmed findings merely turned unconfirmed could be
+// mistaken for a clean one or saved as a baseline.
+func (r *run) finish(ctx context.Context, report Report) (Report, error) {
+	if err := ctx.Err(); err != nil {
+		return report, fmt.Errorf("app: the run was interrupted before every finding was verified: %w", err)
+	}
+	return report, nil
 }
 
 // VerifyOutput verifies nuclei output produced earlier, read from in.
@@ -87,11 +100,14 @@ func VerifyOutput(ctx context.Context, cfg config.Config, policy *scope.Policy, 
 	if err := r.preflight(ctx); err != nil {
 		return Report{}, err
 	}
-	candidates, _, err := nuclei.Parse(in)
+	candidates, skipped, err := nuclei.Parse(in)
 	if err != nil {
 		return Report{}, err
 	}
-	return r.verify(ctx, r.redact(candidates)), nil
+	if skipped > 0 {
+		r.note("%d line(s) of the scanner output could not be read and were left out.", skipped)
+	}
+	return r.finish(ctx, r.verify(ctx, r.redact(candidates)))
 }
 
 // pipelineFor picks the verification pipeline for a finding's kind.
@@ -101,6 +117,8 @@ func (r *run) pipelineFor(f finding.Finding) *verify.Pipeline {
 		return r.staticPipeline
 	case finding.Dependency:
 		return r.dependencyPipeline
+	case finding.Network:
+		return r.networkPipeline
 	default:
 		return r.dynamicPipeline
 	}
@@ -119,8 +137,12 @@ func (r *run) verify(ctx context.Context, candidates []finding.Finding) Report {
 				Reason: "this run is not configured to verify " + string(f.Kind) + " findings",
 			}).WithStatus(finding.Unconfirmed)
 		}
-		verified = append(verified, f)
+		verified = append(verified, r.scrubFinding(f))
 	}
+	if err := r.budget.Check(); err != nil {
+		r.note("The run stopped early (%v). Findings that were not verified in time are unconfirmed.", err)
+	}
+	r.scrubActivity()
 	verified = corroborate(verified)
 	sortFindings(verified)
 	summary := map[finding.Status]int{}

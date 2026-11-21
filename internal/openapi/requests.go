@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"regexp"
 	"strings"
+	"unicode"
 
 	"github.com/dhruv29/vajra/internal/probe"
 )
@@ -18,6 +19,8 @@ const (
 	reasonUnsupportedMethod = "the probe does not send %s requests"
 	reasonMissingPathParam  = "no value for path parameter %q"
 	reasonBodyTooLarge      = "the body example is larger than the probe accepts"
+	reasonBadPathTemplate   = "the path template %q is not a plain path starting with /"
+	reasonDotPathParam      = "the value of path parameter %q would change the route"
 )
 
 // placeholderPattern matches one {name} in a path template.
@@ -96,9 +99,15 @@ func (op Operation) request(base string, opts RequestOptions) (probe.Request, st
 	case !unsafeMethods[op.Method] && !safeMethods[op.Method]:
 		return probe.Request{}, fmt.Sprintf(reasonUnsupportedMethod, op.Method)
 	}
-	path, missing := op.fillPath(opts.Params)
-	if missing != "" {
+	if !plainPathTemplate(op.Path) {
+		return probe.Request{}, fmt.Sprintf(reasonBadPathTemplate, op.Path)
+	}
+	path, missing, dotted := op.fillPath(opts.Params)
+	switch {
+	case missing != "":
 		return probe.Request{}, fmt.Sprintf(reasonMissingPathParam, missing)
+	case dotted != "":
+		return probe.Request{}, fmt.Sprintf(reasonDotPathParam, dotted)
 	}
 	request := probe.Request{
 		ID:      op.ID,
@@ -117,10 +126,24 @@ func (op Operation) request(base string, opts RequestOptions) (probe.Request, st
 	return request, ""
 }
 
+// plainPathTemplate reports whether a path template can be appended to the
+// base URL as it is. A "?" or "#" would start a query or fragment the caller
+// did not ask for, and whitespace, backslashes and control characters are
+// read differently by different servers and proxies.
+func plainPathTemplate(path string) bool {
+	if !strings.HasPrefix(path, "/") {
+		return false
+	}
+	return !strings.ContainsFunc(path, func(r rune) bool {
+		return r == '?' || r == '#' || r == '\\' || unicode.IsSpace(r) || unicode.IsControl(r)
+	})
+}
+
 // fillPath replaces every {name} in the template with its escaped value. It
-// returns the name of the first parameter that has none. An empty value
-// counts as none: it would produce a different route.
-func (op Operation) fillPath(params map[string]string) (path, missing string) {
+// returns the name of the first parameter that has none, and of the first
+// whose value is "." or "..". An empty value counts as none, and a dot
+// segment is not escaped by PathEscape: either would reach a different route.
+func (op Operation) fillPath(params map[string]string) (path, missing, dotted string) {
 	path = placeholderPattern.ReplaceAllStringFunc(op.Path, func(placeholder string) string {
 		name := strings.Trim(placeholder, "{}")
 		value := params[name]
@@ -130,12 +153,12 @@ func (op Operation) fillPath(params map[string]string) (path, missing string) {
 		if value == "" && missing == "" {
 			missing = name
 		}
+		if (value == "." || value == "..") && dotted == "" {
+			dotted = name
+		}
 		return url.PathEscape(value)
 	})
-	if !strings.HasPrefix(path, "/") {
-		path = "/" + path
-	}
-	return path, missing
+	return path, missing, dotted
 }
 
 // query builds the query string, with its leading "?". A parameter is sent

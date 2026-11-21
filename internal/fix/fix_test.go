@@ -37,15 +37,25 @@ func (p *fakeProposer) Propose(ctx context.Context, f finding.Finding, numbered 
 	return p.proposal, p.err
 }
 
-// fakeScanner reports fixed findings and records the tree it was shown while
-// that tree still exists.
+// fakeScanner is called twice: first on a copy of the unpatched file, where it
+// reports baseline (by default the finding's rule), then on the patched copy,
+// where it reports findings. It records the patched tree while it still exists.
 type fakeScanner struct {
 	findings []finding.Finding
 	err      error
+	// baseline replaces the default unpatched findings when noBaseline is
+	// false and it is not nil.
+	baseline    []finding.Finding
+	noBaseline  bool
+	baselineErr error
+	// original is the unpatched file as the scanner read it.
+	original string
 	calls    int
 	ctx      context.Context
-	root     string
-	rel      string
+	// roots are the trees scanned, in order; root is the last.
+	roots []string
+	root  string
+	rel   string
 	// content is the patched file as the scanner read it.
 	content string
 	// files are the regular files under root; modes covers directories too.
@@ -56,9 +66,20 @@ type fakeScanner struct {
 func (s *fakeScanner) scan(ctx context.Context, root, rel string) ([]finding.Finding, error) {
 	s.calls++
 	s.ctx, s.root, s.rel = ctx, root, rel
+	s.roots = append(s.roots, root)
 	raw, err := os.ReadFile(filepath.Join(root, rel))
 	if err != nil {
-		return nil, fmt.Errorf("the patched file is not where the scanner was told: %w", err)
+		return nil, fmt.Errorf("the file is not where the scanner was told: %w", err)
+	}
+	if s.calls == 1 {
+		s.original = string(raw)
+		switch {
+		case s.noBaseline:
+			return nil, s.baselineErr
+		case s.baseline != nil:
+			return s.baseline, s.baselineErr
+		}
+		return []finding.Finding{match(testRule, 1)}, s.baselineErr
 	}
 	s.content, s.files, s.modes = string(raw), nil, map[string]fs.FileMode{}
 	err = filepath.WalkDir(root, func(path string, d fs.DirEntry, walkErr error) error {
@@ -145,8 +166,11 @@ func TestAttemptVerifiesAChangeAfterWhichTheRuleNoLongerMatches(t *testing.T) {
 	if result != want {
 		t.Fatalf("result = %+v\nwant     %+v", result, want)
 	}
-	if proposer.calls != 1 || scanner.calls != 1 {
-		t.Fatalf("proposer calls = %d, scanner calls = %d; want one each", proposer.calls, scanner.calls)
+	if proposer.calls != 1 || scanner.calls != 2 {
+		t.Fatalf("proposer calls = %d, scanner calls = %d; want one proposal and two scans", proposer.calls, scanner.calls)
+	}
+	if scanner.original != numberedSource(10) {
+		t.Fatalf("the first scan saw %q; want the unpatched file", scanner.original)
 	}
 }
 
@@ -208,8 +232,11 @@ func TestThePatchIsAUnifiedDiffOfTheChangedRange(t *testing.T) {
 			result, err := Attempt(context.Background(), root, codeFinding(testFile, tc.proposal.StartLine),
 				&fakeProposer{proposal: tc.proposal}, scanner.scan)
 
-			if err != nil || !result.Verified {
-				t.Fatalf("result = %+v, err = %v", result, err)
+			// A change that only deletes lines is never verified, but its
+			// patch is still returned for review.
+			wantVerified := strings.TrimSpace(tc.proposal.Replacement) != ""
+			if err != nil || result.Verified != wantVerified {
+				t.Fatalf("result = %+v, err = %v; want verified = %v", result, err, wantVerified)
 			}
 			if want := "--- a/app/db.go\n+++ b/app/db.go\n" + tc.want; result.Patch != want {
 				t.Fatalf("patch:\n%s\nwant:\n%s", result.Patch, want)
@@ -231,8 +258,8 @@ func TestTheScannerSeesThePatchedFileAtTheSameRelativePath(t *testing.T) {
 		"the last line of a file without a trailing newline":  {"a\nb\nc", replace(3, 3, "C\n"), "a\nb\nC"},
 		"the first line becoming two":                         {"a\nb\n", replace(1, 1, "x\ny"), "x\ny\nb\n"},
 		"the last line becoming two, without a final newline": {"a\nb", replace(2, 2, "x\ny"), "a\nx\ny"},
-		"an empty replacement deletes the lines":              {"a\nb\nc\nd\n", replace(2, 3, ""), "a\nd\n"},
-		"deleting the last line of a file without a newline":  {"a\nb\nc", replace(3, 3, ""), "a\nb"},
+		"two lines becoming one":                              {"a\nb\nc\nd\n", replace(2, 3, "x"), "a\nx\nd\n"},
+		"the last two lines of a file without a newline":      {"a\nb\nc", replace(2, 3, "x"), "a\nx"},
 		"blank lines elsewhere are untouched":                 {"a\n\n\nb\n\n", replace(4, 4, "B"), "a\n\n\nB\n\n"},
 	}
 	for name, tc := range cases {
@@ -246,8 +273,9 @@ func TestTheScannerSeesThePatchedFileAtTheSameRelativePath(t *testing.T) {
 			if err != nil || !result.Verified || result.File != rel {
 				t.Fatalf("result = %+v, err = %v", result, err)
 			}
-			if scanner.rel != rel || scanner.content != tc.want {
-				t.Fatalf("scanner was shown %q holding %q; want %q holding %q", scanner.rel, scanner.content, rel, tc.want)
+			if scanner.rel != rel || scanner.original != tc.original || scanner.content != tc.want {
+				t.Fatalf("scanner was shown %q holding %q then %q; want %q holding %q then %q",
+					scanner.rel, scanner.original, scanner.content, rel, tc.original, tc.want)
 			}
 			if !slices.Equal(scanner.files, []string{rel}) {
 				t.Fatalf("files in the scanned tree = %v; want only the patched file", scanner.files)
@@ -278,11 +306,16 @@ func TestTheSourceTreeIsNeverModifiedAndTheCopyIsRemoved(t *testing.T) {
 			if err != nil || len(entries) != 1 {
 				t.Fatalf("entries next to the source file = %v, err = %v; nothing may be written there", entries, err)
 			}
-			if scanner.calls != 1 || scanner.root == "" || strings.HasPrefix(scanner.root, root) {
-				t.Fatalf("scanner calls = %d, root = %q; the scan must run on a copy outside %q", scanner.calls, scanner.root, root)
+			if scanner.calls != 2 || len(scanner.roots) != 2 {
+				t.Fatalf("scanner calls = %d; want the unpatched and the patched copy", scanner.calls)
 			}
-			if _, err := os.Stat(scanner.root); !errors.Is(err, fs.ErrNotExist) {
-				t.Fatalf("the temporary tree %q was left behind (stat err = %v)", scanner.root, err)
+			for _, scanned := range scanner.roots {
+				if scanned == "" || strings.HasPrefix(scanned, root) {
+					t.Fatalf("root = %q; the scan must run on a copy outside %q", scanned, root)
+				}
+				if _, err := os.Stat(filepath.Dir(scanned)); !errors.Is(err, fs.ErrNotExist) {
+					t.Fatalf("the temporary tree %q was left behind (stat err = %v)", filepath.Dir(scanned), err)
+				}
 			}
 		})
 	}
@@ -370,19 +403,208 @@ func TestARuleThatStillMatchesLeavesThePatchUnverified(t *testing.T) {
 	}
 }
 
-func TestADifferentRuleMatchingThePatchedFileDoesNotBlockVerification(t *testing.T) {
+func TestADifferentRuleThatAlsoMatchedTheOriginalDoesNotBlockVerification(t *testing.T) {
 	root := writeSource(t, testFile, numberedSource(10))
-	scanner := &fakeScanner{findings: []finding.Finding{
+	others := []finding.Finding{
 		match("go.weak-hash", 5),
 		match(testRule+".v2", 5),
 		match(strings.ToUpper(testRule), 5),
 		{RuleID: ""},
-	}}
+	}
+	scanner := &fakeScanner{baseline: append([]finding.Finding{match(testRule, 5)}, others...), findings: others}
 
 	result, err := Attempt(context.Background(), root, codeFinding(testFile, 5), &fakeProposer{proposal: replace(5, 5, "fixed")}, scanner.scan)
 
 	if err != nil || !result.Verified || result.Reason != verifiedText {
-		t.Fatalf("result = %+v, err = %v; only the finding's own rule decides", result, err)
+		t.Fatalf("result = %+v, err = %v; rules that already matched the original do not decide", result, err)
+	}
+}
+
+func TestARuleThatOnlyMatchesThePatchedFileLeavesThePatchUnverified(t *testing.T) {
+	cases := map[string]struct {
+		baseline, remaining []finding.Finding
+		wantReason          string
+	}{
+		"a new rule": {nil, []finding.Finding{match("go.command-injection", 6)},
+			"the change introduces a finding the original did not have: rule go.command-injection at line 6"},
+		"a new rule after one that matched before": {
+			[]finding.Finding{match(testRule, 5), match("go.weak-hash", 2)},
+			[]finding.Finding{match("go.weak-hash", 2), match("go.path-traversal", 5)},
+			"the change introduces a finding the original did not have: rule go.path-traversal at line 5"},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			root := writeSource(t, testFile, numberedSource(10))
+			scanner := &fakeScanner{baseline: tc.baseline, findings: tc.remaining}
+
+			result, err := Attempt(context.Background(), root, codeFinding(testFile, 5), &fakeProposer{proposal: replace(5, 5, "exec(input)")}, scanner.scan)
+
+			if err != nil || result.Verified || result.Reason != tc.wantReason || result.Patch == "" {
+				t.Fatalf("result = %+v, err = %v; want unverified with %q and the patch", result, err, tc.wantReason)
+			}
+		})
+	}
+}
+
+func TestAFindingTheScannerDoesNotReportOnTheOriginalIsNeverVerified(t *testing.T) {
+	cases := map[string]*fakeScanner{
+		"nothing reported":       {noBaseline: true},
+		"only other rules found": {baseline: []finding.Finding{match("go.weak-hash", 5)}},
+	}
+	for name, scanner := range cases {
+		t.Run(name, func(t *testing.T) {
+			root := writeSource(t, testFile, numberedSource(10))
+
+			result, err := Attempt(context.Background(), root, codeFinding(testFile, 5), &fakeProposer{proposal: replace(5, 5, "fixed")}, scanner.scan)
+
+			want := "the scanner does not report this finding on the unpatched file, so a clean result after the change proves nothing"
+			if err != nil || result.Verified || result.Reason != want || result.Patch == "" {
+				t.Fatalf("result = %+v, err = %v; want unverified with %q", result, err, want)
+			}
+			if scanner.calls != 1 {
+				t.Fatalf("scanner calls = %d; the patched copy need not be scanned", scanner.calls)
+			}
+		})
+	}
+}
+
+func TestAChangeThatOnlyRemovesOrCommentsOutCodeIsNotAFix(t *testing.T) {
+	const reason = "the proposed change only removes or comments out code, which is not a fix"
+	cases := map[string]Proposal{
+		"deleting the line":               replace(5, 5, ""),
+		"whitespace only":                 replace(5, 5, "  \n\t\n"),
+		"a hash comment":                  replace(5, 5, "# line 5"),
+		"a slash comment":                 replace(5, 5, "\t// line 5"),
+		"a block comment":                 replace(5, 6, "/* line 5\n * line 6 */"),
+		"an SQL comment":                  replace(5, 5, "-- line 5"),
+		"an HTML comment":                 replace(5, 5, "<!-- line 5 -->"),
+		"keeping one line, deleting one":  replace(5, 6, "line 6"),
+		"commenting one, keeping another": replace(5, 6, "// line 5\n  line 6"),
+	}
+	for name, proposal := range cases {
+		t.Run(name, func(t *testing.T) {
+			root := writeSource(t, testFile, numberedSource(10))
+			scanner := &fakeScanner{}
+
+			result, err := Attempt(context.Background(), root, codeFinding(testFile, 5), &fakeProposer{proposal: proposal}, scanner.scan)
+
+			if err != nil || result.Verified || result.Reason != reason || result.Patch == "" {
+				t.Fatalf("result = %+v, err = %v; want unverified with %q and the patch", result, err, reason)
+			}
+			if scanner.calls != 0 {
+				t.Fatalf("scanner calls = %d; a change that is not a fix need not be scanned", scanner.calls)
+			}
+		})
+	}
+}
+
+func TestAChangeWithACommentAndNewCodeIsChecked(t *testing.T) {
+	root := writeSource(t, testFile, numberedSource(10))
+	scanner := &fakeScanner{}
+
+	result, err := Attempt(context.Background(), root, codeFinding(testFile, 5),
+		&fakeProposer{proposal: replace(5, 5, "// bind the value\nbound(5)")}, scanner.scan)
+
+	if err != nil || !result.Verified || scanner.calls != 2 {
+		t.Fatalf("result = %+v, err = %v, scanner calls = %d", result, err, scanner.calls)
+	}
+}
+
+func TestOnlyLinesShownToTheModelMayBeChanged(t *testing.T) {
+	const line = 100
+	cases := map[string]struct {
+		proposal   Proposal
+		wantReason string
+	}{
+		"just before the window":   {replace(line-WindowLines-1, line-WindowLines-1, "x"), "the proposed change was not usable: lines 19-19 are outside the lines 20-180 shown around the finding"},
+		"just after the window":    {replace(line+WindowLines+1, line+WindowLines+1, "x"), "the proposed change was not usable: lines 181-181 are outside the lines 20-180 shown around the finding"},
+		"straddling the start":     {replace(line-WindowLines-1, line, "x"), "the proposed change was not usable: lines 19-100 are outside the lines 20-180 shown around the finding"},
+		"the first line shown":     {replace(line-WindowLines, line-WindowLines, "x"), verifiedText},
+		"the last line shown":      {replace(line+WindowLines, line+WindowLines, "x"), verifiedText},
+		"every line that is shown": {replace(line-WindowLines, line+WindowLines, "x"), verifiedText},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			root := writeSource(t, testFile, numberedSource(250))
+			scanner := &fakeScanner{}
+
+			result, err := Attempt(context.Background(), root, codeFinding(testFile, line), &fakeProposer{proposal: tc.proposal}, scanner.scan)
+
+			if err != nil || result.Reason != tc.wantReason || result.Verified != (tc.wantReason == verifiedText) {
+				t.Fatalf("result = %+v, err = %v; want %q", result, err, tc.wantReason)
+			}
+		})
+	}
+}
+
+func TestTheScannedTreeSitsInsideAPrivateDirectory(t *testing.T) {
+	root := writeSource(t, testFile, numberedSource(10))
+	scanner := &fakeScanner{}
+	var parentModes, rootModes []fs.FileMode
+	var bases []string
+	rescan := func(ctx context.Context, scanRoot, rel string) ([]finding.Finding, error) {
+		for path, modes := range map[string]*[]fs.FileMode{filepath.Dir(scanRoot): &parentModes, scanRoot: &rootModes} {
+			info, err := os.Stat(path)
+			if err != nil {
+				return nil, err
+			}
+			*modes = append(*modes, info.Mode().Perm())
+		}
+		bases = append(bases, filepath.Base(scanRoot))
+		return scanner.scan(ctx, scanRoot, rel)
+	}
+
+	if _, err := Attempt(context.Background(), root, codeFinding(testFile, 5), &fakeProposer{proposal: replace(5, 5, "x")}, rescan); err != nil {
+		t.Fatal(err)
+	}
+
+	if len(bases) != 2 {
+		t.Fatalf("scans = %d; want two", len(bases))
+	}
+	for i := range bases {
+		if parentModes[i] != privateDirMode || rootModes[i] != dirMode || bases[i] != "tree" {
+			t.Fatalf("scan %d: parent mode = %v, root %q mode = %v; want a 0700 parent holding a 0755 \"tree\"",
+				i, parentModes[i], bases[i], rootModes[i])
+		}
+	}
+	for _, scanned := range scanner.roots {
+		if _, err := os.Stat(filepath.Dir(scanned)); !errors.Is(err, fs.ErrNotExist) {
+			t.Fatalf("the private parent of %q was left behind (stat err = %v)", scanned, err)
+		}
+	}
+}
+
+func TestControlAndInvisibleCharactersAreRejectedInTheReplacementAndStrippedFromTheExplanation(t *testing.T) {
+	const reason = "the proposed change was not usable: the replacement contains control or invisible characters"
+	cases := map[string]string{
+		"escape":                   "x\x1b[2K",
+		"carriage return":          "x\ry",
+		"right-to-left override":   "x\u202ey",
+		"zero-width space":         "x\u200by",
+		"byte order mark":          "\ufeffx",
+		"isolate":                  "x\u2066y\u2069",
+		"C1 next-line control":     "x\u0085y",
+		"delete control character": "x\x7fy",
+	}
+	for name, replacement := range cases {
+		t.Run(name, func(t *testing.T) {
+			root := writeSource(t, testFile, numberedSource(10))
+			scanner := &fakeScanner{}
+
+			result, err := Attempt(context.Background(), root, codeFinding(testFile, 5), &fakeProposer{proposal: replace(5, 5, replacement)}, scanner.scan)
+
+			if err != nil || result.Verified || result.Reason != reason || scanner.calls != 0 {
+				t.Fatalf("result = %+v, err = %v, scanner calls = %d; want %q", result, err, scanner.calls, reason)
+			}
+		})
+	}
+
+	root := writeSource(t, testFile, numberedSource(10))
+	proposer := &fakeProposer{proposal: Proposal{StartLine: 5, EndLine: 5, Replacement: "\tbound(5)",
+		Explanation: "Binds\u202e the\x1b[2K value\u200b.\n\tSafe\r now."}}
+	result, err := Attempt(context.Background(), root, codeFinding(testFile, 5), proposer, (&fakeScanner{}).scan)
+	if err != nil || !result.Verified || result.Explanation != "Binds the[2K value.\n\tSafe now." {
+		t.Fatalf("result = %+v, err = %v; tabs and newlines are kept, other invisible characters dropped", result, err)
 	}
 }
 
@@ -399,6 +621,7 @@ func TestUnusableProposalsAreReportedWithoutRunningTheScanner(t *testing.T) {
 		"end before start":            {replace(10, 9, "x"), unusable + "lines 10-9 are not a range within the file's 250 lines"},
 		"no range at all":             {Proposal{Explanation: "Binds the parameter."}, unusable + "lines 0-0 are not a range within the file's 250 lines"},
 		"more than the line limit":    {replace(1, maxChangedLines+1, "x"), unusable + "it rewrites more than 200 lines"},
+		"exactly the line limit":      {replace(1, maxChangedLines, "x"), unusable + "lines 1-200 are outside the lines 1-90 shown around the finding"},
 		"oversized replacement":       {replace(10, 10, strings.Repeat("x", maxReplacement+1)), unusable + "the replacement is too large"},
 		"NUL byte":                    {replace(10, 10, "a\x00b"), unusable + "the replacement contains a NUL byte"},
 		"the same line again":         {replace(10, 10, "line 10"), "the proposed change leaves the file as it was"},
@@ -427,19 +650,22 @@ func TestUnusableProposalsAreReportedWithoutRunningTheScanner(t *testing.T) {
 }
 
 func TestProposalsAtTheLimitsAreApplied(t *testing.T) {
-	cases := map[string]Proposal{
-		"exactly the line limit":        replace(1, maxChangedLines, "x"),
-		"exactly the replacement limit": replace(10, 10, strings.Repeat("x", maxReplacement)),
-		"the whole of a one-line range": replace(250, 250, "x"),
+	cases := map[string]struct {
+		line     int
+		proposal Proposal
+	}{
+		"every line shown to the model": {100, replace(100-WindowLines, 100+WindowLines, "x")},
+		"exactly the replacement limit": {10, replace(10, 10, strings.Repeat("x", maxReplacement))},
+		"the last line of the file":     {250, replace(250, 250, "x")},
 	}
-	for name, proposal := range cases {
+	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
 			root := writeSource(t, testFile, numberedSource(250))
 			scanner := &fakeScanner{}
 
-			result, err := Attempt(context.Background(), root, codeFinding(testFile, 10), &fakeProposer{proposal: proposal}, scanner.scan)
+			result, err := Attempt(context.Background(), root, codeFinding(testFile, tc.line), &fakeProposer{proposal: tc.proposal}, scanner.scan)
 
-			if err != nil || !result.Verified || scanner.calls != 1 {
+			if err != nil || !result.Verified || scanner.calls != 2 {
 				t.Fatalf("verified = %v, reason = %q, err = %v, scanner calls = %d", result.Verified, result.Reason, err, scanner.calls)
 			}
 		})
@@ -462,17 +688,27 @@ func TestAProposerErrorIsReturned(t *testing.T) {
 }
 
 func TestARescanErrorIsReturned(t *testing.T) {
-	root := writeSource(t, testFile, numberedSource(10))
 	sentinel := errors.New("scanner crashed")
-	scanner := &fakeScanner{err: sentinel, findings: []finding.Finding{match("go.other", 1)}}
-
-	result, err := Attempt(context.Background(), root, codeFinding(testFile, 5), &fakeProposer{proposal: replace(5, 5, "x")}, scanner.scan)
-
-	if !errors.Is(err, sentinel) || !strings.Contains(err.Error(), "fix: re-run the scanner on the patched file") {
-		t.Fatalf("err = %v; want the scanner's error, wrapped", err)
+	cases := map[string]struct {
+		scanner *fakeScanner
+		wantErr string
+	}{
+		"on the patched file":   {&fakeScanner{err: sentinel, findings: []finding.Finding{match("go.other", 1)}}, "fix: re-run the scanner on the patched file"},
+		"on the unpatched file": {&fakeScanner{baselineErr: sentinel}, "fix: run the scanner on the unpatched file"},
 	}
-	if result != (Result{}) {
-		t.Fatalf("result = %+v; a patch that was never checked must not be returned as a result", result)
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			root := writeSource(t, testFile, numberedSource(10))
+
+			result, err := Attempt(context.Background(), root, codeFinding(testFile, 5), &fakeProposer{proposal: replace(5, 5, "x")}, tc.scanner.scan)
+
+			if !errors.Is(err, sentinel) || !strings.Contains(err.Error(), tc.wantErr) {
+				t.Fatalf("err = %v; want the scanner's error, wrapped as %q", err, tc.wantErr)
+			}
+			if result != (Result{}) {
+				t.Fatalf("result = %+v; a patch that was never checked must not be returned as a result", result)
+			}
+		})
 	}
 }
 
@@ -638,18 +874,16 @@ func TestAPatchForAFileWithoutATrailingNewlineSaysSo(t *testing.T) {
 	}
 }
 
-func TestDeletingEveryLineLeavesTheScannerAnEmptyFile(t *testing.T) {
-	t.Skip("BUG: deleting every line of a file that ends in a newline gives the scanner a one-byte file holding \"\\n\" " +
-		"(fix.go:194-197 appends the newline to no lines), while applying the returned patch gives an empty file")
+func TestDeletingEveryLineIsNotAFixAndIsNotScanned(t *testing.T) {
 	root := writeSource(t, testFile, "only\n")
 	scanner := &fakeScanner{}
 
 	result, err := Attempt(context.Background(), root, codeFinding(testFile, 1), &fakeProposer{proposal: replace(1, 1, "")}, scanner.scan)
 
-	if err != nil || !result.Verified || !strings.HasSuffix(result.Patch, " @@\n-only\n") {
+	if err != nil || result.Verified || !strings.HasSuffix(result.Patch, " @@\n-only\n") {
 		t.Fatalf("result = %+v, err = %v", result, err)
 	}
-	if scanner.content != "" {
-		t.Fatalf("scanned content = %q; the patch describes an empty file", scanner.content)
+	if scanner.calls != 0 {
+		t.Fatalf("scanner calls = %d; a deletion is refused before scanning", scanner.calls)
 	}
 }

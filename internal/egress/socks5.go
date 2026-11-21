@@ -45,6 +45,16 @@ const (
 	// having read its whole request, so a silent client cannot hold a
 	// connection open. It also bounds each reply write.
 	socksHandshakeTimeout = 15 * time.Second
+	// socksMaxConns bounds the client connections open at once. Past it a new
+	// connection is closed as soon as it is accepted, so a client that opens
+	// connections without end cannot use up the gate's file descriptors.
+	socksMaxConns = 256
+	// socksAcceptRetryMin and socksAcceptRetryMax bound the wait after a
+	// temporary accept error such as running out of file descriptors. The
+	// wait doubles from the first to the second, as net/http does; without it
+	// the loop would spin, and returning would bring the whole gate down.
+	socksAcceptRetryMin = 5 * time.Millisecond
+	socksAcceptRetryMax = time.Second
 )
 
 var errSOCKSVersion = errors.New("egress: not a SOCKS5 client")
@@ -61,6 +71,7 @@ type SOCKS5 struct {
 	handshakeTimeout time.Duration
 	dialTimeout      time.Duration
 	tunnelIdle       time.Duration
+	maxConns         int
 }
 
 // NewSOCKS5 builds a SOCKS5 front end around guard. Every decision is sent
@@ -79,6 +90,7 @@ func NewSOCKS5(guard *Guard, sink Sink) (*SOCKS5, error) {
 		handshakeTimeout: socksHandshakeTimeout,
 		dialTimeout:      dialTimeout,
 		tunnelIdle:       tunnelIdleTimeout,
+		maxConns:         socksMaxConns,
 	}, nil
 }
 
@@ -110,22 +122,60 @@ func (s *SOCKS5) Serve(ctx context.Context, listener net.Listener) error {
 }
 
 // accept hands each connection to its own goroutine and returns the error
-// that ended the loop.
+// that ended the loop. A temporary error is waited out instead: the listener
+// still works, and the connections already open will free what it lacked.
 func (s *SOCKS5) accept(ctx context.Context, listener net.Listener, open *connSet, wg *sync.WaitGroup) error {
+	slots := make(chan struct{}, s.maxConns)
+	var retry time.Duration
 	for {
 		client, err := listener.Accept()
 		if err != nil {
-			return err
+			if !isTemporary(err) || ctx.Err() != nil {
+				return err
+			}
+			retry = min(max(2*retry, socksAcceptRetryMin), socksAcceptRetryMax)
+			if !sleep(ctx, retry) {
+				return ctx.Err()
+			}
+			continue
+		}
+		retry = 0
+		select {
+		case slots <- struct{}{}:
+		default:
+			_ = client.Close() // over the limit: refused, never served
+			continue
 		}
 		if !open.add(client) {
+			<-slots
 			_ = client.Close() // accepted while shutting down
 			continue
 		}
 		wg.Go(func() {
+			defer func() { <-slots }()
 			defer open.remove(client)
 			defer client.Close()
 			s.handle(ctx, client)
 		})
+	}
+}
+
+// isTemporary reports whether an accept error may go away by itself, such as
+// EMFILE or a connection aborted before it was accepted.
+func isTemporary(err error) bool {
+	var temporary interface{ Temporary() bool }
+	return errors.As(err, &temporary) && temporary.Temporary()
+}
+
+// sleep waits for d and reports false if ctx was cancelled first.
+func sleep(ctx context.Context, d time.Duration) bool {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return true
+	case <-ctx.Done():
+		return false
 	}
 }
 

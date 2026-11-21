@@ -252,3 +252,16 @@ func TestNewCheckerValidation(t *testing.T) {
 		t.Fatalf("secret headers = %v", got)
 	}
 }
+
+func TestACredentialEchoedInTheBodyIsScrubbedFromEvidence(t *testing.T) {
+	app := newApp()
+	app.pages[adminURL]["Bearer user-token"] = ok("debug: {\"Authorization\": \"Bearer user-token\", \"admin\": \"admin-token\"}")
+	c := checker(t, app, Check{Name: "User administration", URL: adminURL, Allow: []string{"admin"}})
+
+	findings, _ := c.Run(context.Background())
+
+	raw, _ := json.Marshal(findings)
+	if len(findings) != 1 || strings.Contains(string(raw), "user-token") || strings.Contains(string(raw), "admin-token") {
+		t.Fatalf("a credential echoed by the target is in the finding: %s", raw)
+	}
+}

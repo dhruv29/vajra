@@ -578,3 +578,38 @@ func TestIsLiveAndNeedsProbe(t *testing.T) {
 		})
 	}
 }
+
+func TestGraphQLAndPortsSections(t *testing.T) {
+	probeSection := map[string]any{"image": "vajra:local", "timeout_seconds": 60}
+	valid := func() map[string]any {
+		m := validMap()
+		m["scope"] = map[string]any{"hosts": []string{"app.test"}, "ports": []int{443, 5432}}
+		m["probe"] = probeSection
+		m["sandbox"] = map[string]any{"network": "vajra-task-net", "proxy_url": "http://gate:3128", "socks_addr": "gate:1080"}
+		m["graphql"] = map[string]any{"endpoint": "https://app.test/graphql", "requires_auth": true}
+		m["ports"] = map[string]any{"hosts": []string{"app.test"}, "ports": []int{443, 5432}, "expected": []int{443}, "timeout_seconds": 60}
+		return m
+	}
+	c, err := parseMap(t, valid())
+	if err != nil || c.GraphQL == nil || !c.GraphQL.RequiresAuth || c.Ports == nil || c.Sandbox.SocksAddr != "gate:1080" || !c.NeedsProbe() || !c.IsLive() {
+		t.Fatalf("config = %+v, err = %v", c, err)
+	}
+	cases := map[string]func(m map[string]any){
+		"graphql endpoint out of scope": func(m map[string]any) { m["graphql"].(map[string]any)["endpoint"] = "https://other.test/graphql" },
+		"graphql endpoint not a URL":    func(m map[string]any) { m["graphql"].(map[string]any)["endpoint"] = "app.test/graphql" },
+		"graphql without a probe":       func(m map[string]any) { delete(m, "probe") },
+		"ports without hosts":           func(m map[string]any) { m["ports"].(map[string]any)["hosts"] = []string{} },
+		"ports without a timeout":       func(m map[string]any) { m["ports"].(map[string]any)["timeout_seconds"] = 0 },
+		"port outside the scope":        func(m map[string]any) { m["ports"].(map[string]any)["ports"] = []int{443, 22} },
+		"host outside the scope":        func(m map[string]any) { m["ports"].(map[string]any)["hosts"] = []string{"db.internal"} },
+		"port out of range":             func(m map[string]any) { m["ports"].(map[string]any)["ports"] = []int{70000} },
+		"ports without the socks gate":  func(m map[string]any) { m["sandbox"].(map[string]any)["socks_addr"] = "" },
+	}
+	for name, mutate := range cases {
+		m := valid()
+		mutate(m)
+		if _, err := parseMap(t, m); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+}

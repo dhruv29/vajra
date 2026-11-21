@@ -23,8 +23,16 @@ const (
 	// pemEndMarker starts the last line of a PEM block.
 	pemEndMarker = "-----END"
 	// maxKeyBodyLines bounds how far a private key header masks the lines
-	// after it when no end line follows. A 4096-bit RSA key is about 50 lines.
-	maxKeyBodyLines = 64
+	// after it: up to the end line, or this many lines when none follows. It
+	// is far above any real key (a 4096-bit RSA key is about 50 lines, an
+	// 8192-bit one or a PGP block with subkeys over 100), so no tail is shown.
+	maxKeyBodyLines = 4096
+
+	// maxFindingsPerFile and maxFindingsPerScan bound the output. A generated
+	// or hostile file of key-shaped lines would otherwise yield tens of
+	// thousands of findings, each with its own context.
+	maxFindingsPerFile = 200
+	maxFindingsPerScan = 5_000
 )
 
 // placeholderWords mark a value as documentation or a reference to where the
@@ -38,8 +46,20 @@ var placeholderWords = []string{
 // templatePattern matches <name>, ${name} and {{name}} substitutions.
 var templatePattern = regexp.MustCompile(`<[^<>]+>|\$\{[^}]*\}|\{\{[^}]*\}\}`)
 
-// span is a half-open byte range in a line.
-type span struct{ start, end int }
+// span is a half-open byte range in a line. tagged says it starts with a
+// provider's public tag, which may stay readable when it is masked.
+type span struct {
+	start, end int
+	tagged     bool
+}
+
+// mask returns the masked form of the span's part of text.
+func (s span) mask(text string) string {
+	if s.tagged {
+		return maskTagged(text[s.start:s.end])
+	}
+	return mask(text[s.start:s.end])
+}
 
 func (s span) overlaps(other span) bool {
 	return s.start < other.end && other.start < s.end
@@ -61,7 +81,7 @@ func matchLine(text string) (hits []hit, masks []span) {
 		for n, value := range r.values(text) {
 			masks = append(masks, value)
 			if n == 0 {
-				hits = append(hits, hit{rule: r, masked: mask(text[value.start:value.end])})
+				hits = append(hits, hit{rule: r, masked: value.mask(text)})
 			}
 		}
 	}
@@ -76,11 +96,27 @@ func matchLine(text string) (hits []hit, masks []span) {
 		}
 		masks = append(masks, value)
 		if !claimed && !reported {
-			hits = append(hits, hit{rule: &genericRule, masked: mask(text[value.start:value.end])})
+			hits = append(hits, hit{rule: &genericRule, masked: value.mask(text)})
 			reported = true
 		}
 	}
-	return hits, masks
+	return hits, append(masks, assignedValues(text)...)
+}
+
+// assignedValues returns the value of every credential-like assignment on the
+// line, whether or not a rule reports it, so that context lines never show a
+// password the entropy or placeholder checks let through.
+func assignedValues(text string) []span {
+	var out []span
+	for _, loc := range credentialAssignment.FindAllStringSubmatchIndex(text, -1) {
+		for group := 2; group+1 < len(loc); group += 2 {
+			if loc[group] >= 0 {
+				out = append(out, span{start: loc[group], end: loc[group+1]})
+				break
+			}
+		}
+	}
+	return out
 }
 
 // looksSecret applies the checks that keep the generic rule from reporting
@@ -147,6 +183,7 @@ func analyse(file string, lines []string) []finding.Finding {
 			hits = append(hits, h)
 		}
 	}
+	hits = hits[:min(len(hits), maxFindingsPerFile)]
 	findings := make([]finding.Finding, 0, len(hits))
 	for _, h := range hits {
 		findings = append(findings, h.toFinding(file, renderContext(masked, h.line)))

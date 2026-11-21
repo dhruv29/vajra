@@ -88,7 +88,7 @@ func TestAgentCandidatesAreReplayedReviewedAndBriefedWithCodeFindings(t *testing
 		t.Fatalf("activity = %+v", activity)
 	}
 	briefing := model.agentBodies[0]
-	for _, want := range []string{"Look for injection in the search.", "Code analysis suggests these weaknesses", "sqli (views.py:3)", "known-issue (https://app.test/k)"} {
+	for _, want := range []string{"Look for injection in the search.", "code analysis suggests: sqli (views.py:3)", "known-issue (https://app.test/k)"} {
 		if !strings.Contains(briefing, want) {
 			t.Errorf("the agent's first message lacks %q", want)
 		}
@@ -167,7 +167,7 @@ func TestAgentRequestsThatCouldChangeDataNeedTheOperator(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if !slices.Equal(operator.asked, []string{"POST https://app.test/orders"}) {
+		if !slices.Equal(operator.asked, []string{`POST https://app.test/orders | body: {"qty":1}`}) {
 			t.Fatalf("operator asked %v", operator.asked)
 		}
 		// Approved once, sent once: verification must not send it again.
@@ -243,7 +243,7 @@ func TestAgentFailureIsNotedAndTheOtherFindingsSurvive(t *testing.T) {
 	if len(report.Activity.AgentSteps) != 2 {
 		t.Fatalf("steps = %+v", report.Activity.AgentSteps)
 	}
-	if !strings.Contains(model.agentBodies[0], "Pages found by crawling: https://app.test/") {
+	if !strings.Contains(model.agentBodies[0], "page found by crawling: https://app.test/") {
 		t.Error("the agent was not told what the crawl found")
 	}
 }

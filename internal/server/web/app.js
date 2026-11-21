@@ -10,6 +10,7 @@ const KINDS = [
   { value: "dast", filter: "Live", name: "live test", badge: null },
   { value: "sast", filter: "Code", name: "code analysis", badge: "code" },
   { value: "sca", filter: "Dependency", name: "dependency", badge: "dependency" },
+  { value: "net", filter: "Network", name: "network", badge: "network" },
 ];
 const DEFAULT_KIND = "dast";
 const MAX_LIST_ROWS = 200;

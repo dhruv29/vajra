@@ -73,8 +73,11 @@ type Score struct {
 	FalsePositives int       `json:"false_positives"`
 	FalseNegatives int       `json:"false_negatives"`
 	TrueNegatives  int       `json:"true_negatives"`
-	// Unexpected holds the IDs of confirmed findings that match no
-	// expectation. They count against precision: the key is the whole truth.
+	// Unexpected holds the IDs of confirmed findings that no expectation
+	// accounts for: those matching none, and surplus duplicates of a real issue
+	// that another confirmed finding already counted for. A confirmed finding
+	// matching a decoy is that decoy's false positive instead. They count
+	// against precision: the key is the whole truth.
 	Unexpected []string `json:"unexpected"`
 	// Precision is TP / (TP + FP + len(Unexpected)), 1 when nothing was reported.
 	Precision float64 `json:"precision"`
@@ -140,11 +143,14 @@ func validateFilters(e Expectation) error {
 }
 
 // Evaluate compares the findings of a run with a key. Only confirmed findings
-// count as reported.
+// count as reported. Each confirmed finding is the true positive of at most one
+// real issue: expectations take, in key order, the first confirmed match no
+// earlier expectation took.
 func Evaluate(key Key, findings []finding.Finding) Score {
 	score := Score{Key: key.Name, Outcomes: make([]Outcome, 0, len(key.Expectations))}
+	consumed := make([]bool, len(findings))
 	for _, e := range key.Expectations {
-		o := judge(e, findings)
+		o := judge(e, findings, consumed)
 		score.Outcomes = append(score.Outcomes, o)
 		switch o.Result {
 		case TruePositive:
@@ -157,7 +163,7 @@ func Evaluate(key Key, findings []finding.Finding) Score {
 			score.TrueNegatives++
 		}
 	}
-	score.Unexpected = unexpected(key, findings)
+	score.Unexpected = unexpected(key, findings, consumed)
 	reported := score.TruePositives + score.FalsePositives + len(score.Unexpected)
 	score.Precision = ratio(score.TruePositives, reported, perfect)
 	score.Recall = ratio(score.TruePositives, score.TruePositives+score.FalseNegatives, perfect)
@@ -170,8 +176,25 @@ func (s Score) Passed(minPrecision, minRecall float64) bool {
 	return s.Precision >= minPrecision && s.Recall >= minRecall
 }
 
-func judge(e Expectation, findings []finding.Finding) Outcome {
-	best, found := bestMatch(e, findings)
+// judge decides one expectation. A real issue consumes the confirmed finding
+// that counts for it and ignores findings already consumed; a decoy consumes
+// nothing.
+func judge(e Expectation, findings []finding.Finding, consumed []bool) Outcome {
+	candidates := findings
+	if e.Present {
+		candidates = make([]finding.Finding, 0, len(findings))
+		for i, f := range findings {
+			if consumed[i] || !matches(e, f) {
+				continue
+			}
+			if f.Status == finding.Confirmed {
+				consumed[i] = true
+				return Outcome{Expectation: e, Result: TruePositive, FindingID: f.ID, Status: f.Status}
+			}
+			candidates = append(candidates, f)
+		}
+	}
+	best, found := bestMatch(e, candidates)
 	reported := found && best.Status == finding.Confirmed
 	o := Outcome{Expectation: e, Result: result(e.Present, reported)}
 	if found {
@@ -242,11 +265,12 @@ func hasCWE(have []string, want string) bool {
 	return false
 }
 
-// unexpected lists, sorted, the confirmed findings no expectation accounts for.
-func unexpected(key Key, findings []finding.Finding) []string {
+// unexpected lists, sorted, the confirmed findings no expectation accounts
+// for: not consumed by a real issue and not matching a decoy.
+func unexpected(key Key, findings []finding.Finding, consumed []bool) []string {
 	ids := []string{}
-	for _, f := range findings {
-		if f.Status == finding.Confirmed && !matchesAny(key, f) {
+	for i, f := range findings {
+		if f.Status == finding.Confirmed && !consumed[i] && !matchesDecoy(key, f) {
 			ids = append(ids, f.ID)
 		}
 	}
@@ -254,9 +278,9 @@ func unexpected(key Key, findings []finding.Finding) []string {
 	return ids
 }
 
-func matchesAny(key Key, f finding.Finding) bool {
+func matchesDecoy(key Key, f finding.Finding) bool {
 	for _, e := range key.Expectations {
-		if matches(e, f) {
+		if !e.Present && matches(e, f) {
 			return true
 		}
 	}

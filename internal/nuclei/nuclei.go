@@ -178,7 +178,37 @@ type Scanner struct {
 	// response. It is run when a finding does not reproduce.
 	CanaryTemplate string
 	// Headers are sent with every request, for scanning as a test account.
+	// They reach the scanner through a config file on standard input, never
+	// through the command line, where any local user could read them.
 	Headers map[string]string
+
+	// skipped counts result lines that could not be read.
+	skipped int
+}
+
+// Skipped returns how many result lines this scanner could not read so far.
+// A non-zero count means the scan is incomplete.
+func (s *Scanner) Skipped() int { return s.skipped }
+
+// headerWrapper stores standard input as a scanner config file and then runs
+// the scanner with it. /tmp is a private in-memory filesystem in the sandbox.
+const headerWrapper = `cat > /tmp/vajra-headers.yaml && exec nuclei -config /tmp/vajra-headers.yaml "$@"`
+
+// headerConfig renders the headers as a scanner config file. Each entry is a
+// JSON string, which is also a valid YAML double-quoted scalar.
+func headerConfig(headers map[string]string) []byte {
+	names := make([]string, 0, len(headers))
+	for name := range headers {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	var b strings.Builder
+	b.WriteString("header:\n")
+	for _, name := range names {
+		quoted, _ := json.Marshal(name + ": " + headers[name])
+		b.WriteString("  - " + string(quoted) + "\n")
+	}
+	return []byte(b.String())
 }
 
 // Validate reports the first missing setting.
@@ -306,14 +336,6 @@ func (s *Scanner) baseArgs(templates string) []string {
 		"-proxy", s.ProxyURL,
 		"-rate-limit", strconv.Itoa(rate),
 	}
-	names := make([]string, 0, len(s.Headers))
-	for name := range s.Headers {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-	for _, name := range names {
-		args = append(args, "-header", name+": "+s.Headers[name])
-	}
 	return args
 }
 
@@ -323,13 +345,13 @@ func (s *Scanner) run(ctx context.Context, args []string) ([]finding.Finding, er
 	}
 	env := sandbox.ProxyEnv(s.ProxyURL)
 	env["HOME"] = sandboxHome // the root filesystem is read-only
-	result, err := s.Runner.Run(ctx, sandbox.Spec{
-		Image:   s.Image,
-		Argv:    args,
-		Network: s.Network,
-		Env:     env,
-		Timeout: s.Timeout,
-	})
+	spec := sandbox.Spec{Image: s.Image, Argv: args, Network: s.Network, Env: env, Timeout: s.Timeout}
+	if len(s.Headers) > 0 {
+		spec.Entrypoint = "sh"
+		spec.Argv = append([]string{"-c", headerWrapper, "nuclei"}, args...)
+		spec.Stdin = headerConfig(s.Headers)
+	}
+	result, err := s.Runner.Run(ctx, spec)
 	if err != nil {
 		return nil, fmt.Errorf("nuclei: %w", err)
 	}
@@ -342,7 +364,8 @@ func (s *Scanner) run(ctx context.Context, args []string) ([]finding.Finding, er
 	if result.Truncated {
 		return nil, errors.New("nuclei: output exceeded the capture limit; narrow the scan")
 	}
-	findings, _, err := Parse(bytes.NewReader(result.Stdout))
+	findings, skipped, err := Parse(bytes.NewReader(result.Stdout))
+	s.skipped += skipped
 	return findings, err
 }
 

@@ -21,6 +21,8 @@ issues with evidence, ranked by what an attacker could reach from each one.
 | Live scanning | nuclei, inside a sandbox, optionally as a test account |
 | Access control | The same request as every test account; reports who is served what they should not be |
 | API | Operations an OpenAPI description marks as protected are requested without credentials |
+| GraphQL | Whether anyone can read the schema, and whether queries are answered without credentials |
+| Ports | Services listening on ports you did not expect, tried through the gate |
 | Discovery | Sub-domains under wildcard scope entries; link-following crawl of the targets |
 | Code | Semgrep with no network over a read-only copy of the source |
 | Secrets | Built-in search for hard-coded credentials; values are masked everywhere |
@@ -51,8 +53,13 @@ Everything found goes through the same verification, and then:
   are all capped, and the time limit cuts off running tools.
 - **Nothing is silently dropped.** Refuted and unconfirmed findings stay in the
   report with the reason.
-- **Credentials stay out of reports.** Test-account headers, cookies and found
-  secrets are redacted before anything is stored or shown to a model.
+- **Credentials stay out of reports.** Test-account credentials are removed by
+  value from everything stored or shown to a model, even when a target echoes
+  them back. They reach the scanner on standard input, never on a command
+  line, and are sent only to the targets you listed, not to hosts that
+  discovery turns up. Found secrets are masked.
+- **An interrupted run is an error.** A run that was cut short exits non-zero
+  and is not saved, so it cannot be mistaken for a clean result.
 
 ## Requirements
 
@@ -100,6 +107,8 @@ Unknown fields are rejected, so a misspelt setting is never silently ignored.
 | `probe` | Image and timeout for Vajra's own HTTP client. Needed by `auth`, `api`, `crawl` and `agent`. |
 | `auth` | Test accounts, which one the scanner uses, and access rules to check. |
 | `api` | An OpenAPI 3 JSON file and the base URL to test it against. |
+| `graphql` | A GraphQL endpoint to check. |
+| `ports` | Hosts and ports to try, and which ports are expected to be open. |
 | `crawl` | Page and depth limits for link-following discovery. |
 | `recon` | Limits for discovering hosts under wildcard scope entries. |
 | `source` | A source tree and which analyses to run on it. |
@@ -152,6 +161,25 @@ Every read-only operation the description marks as needing authentication is
 requested without any. Operations that could change data are never sent and
 are listed in the report as skipped. The file must be JSON; convert YAML first.
 
+### GraphQL and ports
+
+```json
+"graphql": {"endpoint": "https://app.example.com/graphql", "requires_auth": true},
+"sandbox": {"network": "vajra-task-net", "proxy_url": "http://gate:3128", "socks_addr": "gate:1080"},
+"ports": {"hosts": ["app.example.com"], "ports": [443, 5432, 6379], "expected": [443], "timeout_seconds": 60}
+```
+
+The GraphQL check sends two read-only queries without credentials and reports
+when the schema is readable by anyone or, with `requires_auth`, when queries
+are answered at all.
+
+Port discovery opens a TCP connection to each host and port and reports the
+open ones that are not in `expected`. It sends nothing and reads nothing. It
+connects through the gate's SOCKS5 front end (start the gate with `-socks`),
+so only ports listed in `scope` can be tried, and the gate logs each attempt.
+An open port is a plain fact, so it is confirmed by a second connection
+without a reviewer.
+
 ### Source analysis
 
 ```json
@@ -184,8 +212,13 @@ report a weakness, and finish. A report must name an exchange it actually
 made and a pattern that the recorded response matches, so it cannot report
 something it merely believes. Its reports are re-tested and reviewed like any
 other. Requests that could change data are refused unless `unsafe_requests`
-is `"ask"`, in which case you are asked on the terminal each time.
-`vajra stop -data DIR` ends an exploration after its current step.
+is `"ask"`, in which case you are shown the method, URL, header names and body
+on the terminal and asked each time. Headers that make a server treat a
+request as another method are always refused.
+
+`vajra pause -data DIR` makes an exploration wait after its current step,
+`vajra resume` lets it continue, and `vajra stop` ends it. The run's time
+limit keeps counting while it is paused.
 
 ### A second reviewer
 
@@ -234,7 +267,7 @@ not a measurement.
 | `vajra scan -config FILE` | Run every enabled check, then verify each result |
 | `vajra verify -config FILE -in OUTPUT.jsonl` | Verify nuclei output saved earlier |
 | `vajra gate -config FILE [-socks ADDR]` | Run the egress gate (HTTP proxy, optionally SOCKS5 for raw TCP tools) |
-| `vajra stop -data DIR` | Tell a running exploration to stop after its current step |
+| `vajra pause`, `resume`, `stop` `-data DIR` | Pause, continue or end a running exploration |
 | `vajra cleanup` | Remove sandbox containers left by an interrupted run |
 | `vajra runs -data DIR` | List saved runs |
 | `vajra report -data DIR -run ID` | Render a run as `html`, `md` or `json` |
@@ -309,8 +342,10 @@ Verified by `scripts/e2e.sh` against lab targets in Docker:
 - Live scanning finds and reproduces a planted exposure; a stale result is
   refuted when the target answers and left unconfirmed when it does not.
 - Code analysis finds a planted injection and leaves the safe variant alone.
-- Access checks, API tests and the secret search find planted flaws, and no
-  credential or full secret reaches a report or a saved run.
+- Access checks, API tests, GraphQL checks and the secret search find planted
+  flaws, and no credential or full secret reaches a report or a saved run.
+- Port discovery finds an unexpected open port through the SOCKS5 gate and
+  confirms it with a second connection.
 
 Covered by unit tests only, not yet run against a real system:
 
@@ -318,13 +353,16 @@ Covered by unit tests only, not yet run against a real system:
   patch proposer. They are tested against a stand-in for the model API.
   `E2E_REFUTER=anthropic ./scripts/e2e.sh` runs the reviewer for real and
   scores it against the answer key; it needs a valid API key.
-- Host discovery, crawling, dependency advisories and the SOCKS5 gate.
+- Host discovery, crawling and dependency advisories.
 - Blast-radius rules, scores and attack chains are heuristics that have not
   been calibrated against real incidents.
 
-Not built: a recording proxy and browser-driven crawling, port scanning
-through the SOCKS5 gate, user accounts and roles in the web interface, and
-signed container images.
+Two rounds of independent security review have been done, and their findings
+fixed; the fixes from the second round have not themselves been re-reviewed.
+
+Not built: a recording proxy and browser-driven crawling, user accounts and
+roles in the web interface, ticketing integrations, and signed container
+images.
 
 ## Development
 

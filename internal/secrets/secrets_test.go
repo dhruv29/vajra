@@ -2,6 +2,8 @@ package secrets
 
 import (
 	"encoding/json"
+	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -235,17 +237,99 @@ func TestShannonEntropy(t *testing.T) {
 }
 
 func TestMask(t *testing.T) {
-	cases := []struct{ value, want string }{
-		{"abcdefghij", "abcd…[masked 6 chars]"},
-		{"abcde", "abcd…[masked 1 chars]"},
-		{"abcd", "…[masked 4 chars]"},
-		{"", "…[masked 0 chars]"},
-		{"pässwörd", "päss…[masked 4 chars]"},
+	cases := []struct{ value, want, wantTagged string }{
+		{"abcdefghij", "…[masked 10 chars]", "abcd…[masked 6 chars]"},
+		{"abcde", "…[masked 5 chars]", "abcd…[masked 1 chars]"},
+		{"abcd", "…[masked 4 chars]", "…[masked 4 chars]"},
+		{"", "…[masked 0 chars]", "…[masked 0 chars]"},
+		{"pässwörd", "…[masked 8 chars]", "päss…[masked 4 chars]"},
 	}
 	for _, tc := range cases {
 		if got := mask(tc.value); got != tc.want {
 			t.Errorf("mask(%q) = %q, want %q", tc.value, got, tc.want)
 		}
+		if got := maskTagged(tc.value); got != tc.wantTagged {
+			t.Errorf("maskTagged(%q) = %q, want %q", tc.value, got, tc.wantTagged)
+		}
+	}
+}
+
+func TestScanShowsAPrefixOnlyForProviderTags(t *testing.T) {
+	findings := scanContent(t, "aws = "+quoted(fakeAWSKey)+"\n"+passwordAssign+"\nauth = "+quoted(fakeJWT)+"\n")
+
+	got := map[string]string{}
+	for _, f := range findings {
+		got[f.RuleID] = f.Evidence.Extracted[0]
+	}
+	want := map[string]string{
+		"aws-access-key-id":             "AKIA…[masked 16 chars]",
+		"generic-credential-assignment": "…[masked 16 chars]",
+		"jwt":                           fmt.Sprintf("…[masked %d chars]", len(fakeJWT)),
+	}
+	if !maps.Equal(got, want) {
+		t.Fatalf("extracted = %v, want %v", got, want)
+	}
+	if strings.Contains(findings[0].Evidence.Code, "s3cr") {
+		t.Fatalf("context shows the start of the password:\n%s", findings[0].Evidence.Code)
+	}
+}
+
+func TestScanMasksCredentialsNoRuleReportsInContext(t *testing.T) {
+	// Each value escapes the generic rule: unquoted, too short, or with a
+	// placeholder word. All of them sit within the context of the AWS key.
+	unreported := []struct{ value, line string }{
+		{"hunter2realpass", "DB_PASSWORD=hunter2realpass"},
+		{"Sup3rS3cretValue99", "APP_SECRET=Sup3rS3cretValue99"},
+		{"my-test-password-Xk9!", `pw = "my-test-password-Xk9!"`},
+		{"Bearer-abc123", "Authorization: Bearer-abc123"},
+		{"tk9f8e7", "access_key: 'tk9f8e7'"},
+		{"rsa-material-in-config", "private key = rsa-material-in-config"},
+	}
+	var lines []string
+	for i, u := range unreported {
+		if i == contextLines {
+			lines = append(lines, "aws = "+quoted(fakeAWSKey))
+		}
+		lines = append(lines, u.line)
+	}
+
+	findings := scanContent(t, strings.Join(lines, "\n")+"\n")
+	encoded, err := json.Marshal(findings)
+
+	if err != nil || !slices.Equal(ruleIDs(findings), []string{"aws-access-key-id"}) {
+		t.Fatalf("rules = %v, err = %v; context masking must not report anything", ruleIDs(findings), err)
+	}
+	for _, u := range unreported {
+		if strings.Contains(string(encoded), u.value) {
+			t.Errorf("the findings contain the unreported credential %q:\n%s", u.value, findings[0].Evidence.Code)
+		}
+	}
+	if !strings.Contains(findings[0].Evidence.Code, "DB_PASSWORD=…[masked 15 chars]") {
+		t.Errorf("the name of the assignment should stay readable:\n%s", findings[0].Evidence.Code)
+	}
+}
+
+func TestScanCapsFindingsPerFile(t *testing.T) {
+	lines := slices.Repeat([]string{"aws = " + quoted(fakeAWSKey)}, maxFindingsPerFile+50)
+
+	findings := analyse("big.txt", lines)
+
+	if len(findings) != maxFindingsPerFile || findings[len(findings)-1].Location.Line != maxFindingsPerFile {
+		t.Fatalf("findings = %d, want the first %d", len(findings), maxFindingsPerFile)
+	}
+}
+
+func TestScanCapsFindingsPerScanWithoutAnError(t *testing.T) {
+	content := strings.Repeat("aws = "+quoted(fakeAWSKey)+"\n", maxFindingsPerFile)
+	files := map[string]string{}
+	for i := range maxFindingsPerScan/maxFindingsPerFile + 5 {
+		files[fmt.Sprintf("f%03d.txt", i)] = content
+	}
+
+	findings := mustScan(t, writeTree(t, files))
+
+	if len(findings) != maxFindingsPerScan {
+		t.Fatalf("findings = %d, want %d", len(findings), maxFindingsPerScan)
 	}
 }
 
@@ -298,11 +382,37 @@ func TestScanMasksAKeyBodyThatHasNoEndLine(t *testing.T) {
 
 	findings := scanContent(t, fakeKeyHeader+"\n"+body+passwordAssign+"\n")
 
-	if !slices.Equal(targets(findings), []string{"app.txt:1", "app.txt:68"}) {
+	wantLast := fmt.Sprintf("app.txt:%d", maxKeyBodyLines+4)
+	if !slices.Equal(targets(findings), []string{"app.txt:1", wantLast}) {
 		t.Fatalf("targets = %v", targets(findings))
 	}
 	if strings.Contains(findings[0].Evidence.Code, "Qm9keUxpbmVP") {
 		t.Fatalf("key body is shown:\n%s", findings[0].Evidence.Code)
+	}
+}
+
+func TestScanMasksTheTailOfALongKeyBody(t *testing.T) {
+	cases := []struct {
+		name   string
+		footer string
+	}{
+		{"up to the end line", fakeKeyFooter + "\n"},
+		{"with no end line", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			// A finding right after a 100-line key shows the key's last lines.
+			body := strings.Repeat("VGFpbE9mQUxvbmdLZXlCb2R5\n", 100)
+
+			findings := scanContent(t, fakeKeyHeader+"\n"+body+tc.footer+"aws = "+quoted(fakeAWSKey)+"\n")
+
+			if len(findings) != 2 || findings[1].RuleID != "aws-access-key-id" {
+				t.Fatalf("rules = %v", ruleIDs(findings))
+			}
+			if strings.Contains(findings[1].Evidence.Code, "VGFpbE9m") {
+				t.Fatalf("key tail is shown:\n%s", findings[1].Evidence.Code)
+			}
+		})
 	}
 }
 
@@ -311,7 +421,7 @@ func TestScanShowsNumberedContextWithTheReportedLineMarked(t *testing.T) {
 	want := "      2 | two\n" +
 		"      3 | three\n" +
 		"      4 | four\n" +
-		">     5 | password = \"s3cr…[masked 12 chars]\"\n" +
+		">     5 | password = \"…[masked 16 chars]\"\n" +
 		"      6 | six\n" +
 		"      7 | seven\n" +
 		"      8 | eight\n"

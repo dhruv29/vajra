@@ -52,7 +52,11 @@ func TestFixProposesAPatchChecksItAndLeavesTheSourceAlone(t *testing.T) {
 		t.Fatal(err)
 	}
 	runner := &labRunner{}
-	runner.staticOutput = noResults
+	// The rule fires on the file as it is, and no longer on the patched copy.
+	runner.staticSequence = []string{
+		`{"results":[{"check_id":"rules.sqli","path":"views.py","start":{"line":3},"end":{"line":3},"extra":{"severity":"ERROR"}}]}`,
+		noResults,
+	}
 	model := newModelFake(t)
 	model.fixInput = boundQueryFix
 
@@ -73,12 +77,15 @@ func TestFixProposesAPatchChecksItAndLeavesTheSourceAlone(t *testing.T) {
 	if err != nil || !bytes.Equal(before, after) {
 		t.Fatalf("the source file was changed (err = %v)", err)
 	}
-	if len(runner.staticSpecs) != 1 {
-		t.Fatalf("analyser runs = %d; want one, on the patched copy", len(runner.staticSpecs))
+	// Two runs: one on a copy of the file as it is, to see the rule fire, and
+	// one on the patched copy. Neither touches the real tree.
+	if len(runner.staticSpecs) != 2 {
+		t.Fatalf("analyser runs = %d; want two, both on copies", len(runner.staticSpecs))
 	}
-	spec := runner.staticSpecs[0]
-	if spec.Mounts[0].Source == cfg.Source.Root || spec.Mounts[0].Writable || spec.Argv[len(spec.Argv)-1] != "./views.py" {
-		t.Fatalf("the analyser was run on %+v with %v; want a read-only copy of the one file", spec.Mounts, spec.Argv)
+	for _, spec := range runner.staticSpecs {
+		if spec.Mounts[0].Source == cfg.Source.Root || spec.Mounts[0].Writable || spec.Argv[len(spec.Argv)-1] != "./views.py" {
+			t.Fatalf("the analyser was run on %+v with %v; want a read-only copy of the one file", spec.Mounts, spec.Argv)
+		}
 	}
 	if !strings.Contains(model.allBodies(), "return db.execute(q)") || model.calls() != 1 {
 		t.Fatalf("model calls = %d; want one, carrying the code", model.calls())

@@ -20,6 +20,7 @@ import (
 	"github.com/dhruv29/vajra/internal/config"
 	"github.com/dhruv29/vajra/internal/demo"
 	"github.com/dhruv29/vajra/internal/finding"
+	"github.com/dhruv29/vajra/internal/portscan"
 	"github.com/dhruv29/vajra/internal/probe"
 	"github.com/dhruv29/vajra/internal/record"
 	"github.com/dhruv29/vajra/internal/sandbox"
@@ -49,6 +50,8 @@ Usage:
                [-baseline RUN] [-fail-on-new] [-notify]
   vajra gate   -config run.json [-listen :3128] [-socks ADDR] [-audit audit.jsonl]
   vajra stop   -data DIR
+  vajra pause  -data DIR
+  vajra resume -data DIR
   vajra cleanup
 
   vajra runs     -data DIR
@@ -68,6 +71,8 @@ Usage:
   verify    verify scanner output saved earlier
   gate      run the egress proxy that enforces the scope for task containers
   stop      tell a running scan's autonomous explorer to stop after its current step
+  pause     make the explorer wait after its current step
+  resume    let a paused explorer continue
   cleanup   remove sandbox containers left behind by an interrupted run
 
   runs      list the runs saved in a data directory
@@ -127,6 +132,10 @@ func runWith(ctx context.Context, args []string, stdin io.Reader, stdout, stderr
 		err = runServe(ctx, args[1:], stderr)
 	case "demo":
 		err = runDemo(args[1:], stdout, stderr)
+	case "pause":
+		err = runPause(args[1:], stdout, stderr)
+	case "resume":
+		err = runResume(args[1:], stdout, stderr)
 	case "stop":
 		err = runStop(args[1:], stdout, stderr)
 	case "cleanup":
@@ -147,6 +156,9 @@ func runWith(ctx context.Context, args []string, stdin io.Reader, stdout, stderr
 		err = runVerifySignature(args[1:], stdout, stderr)
 	case "probe":
 		err = runProbe(ctx, args[1:], stdin, stdout, stderr)
+	case "portscan":
+		// Like probe, this runs inside a sandbox container, started by a scan.
+		err = portscan.RunJob(ctx, stdin, stdout)
 	case "help", "-h", "--help":
 		fmt.Fprint(stdout, usage)
 	default:
@@ -221,6 +233,14 @@ func runReport(ctx context.Context, command string, args []string, stdin io.Read
 		}
 	}
 
+	// The findings are written first. Saving the run also reads the gate's
+	// audit log, and a problem there must not cost the results of a scan
+	// that has already been paid for.
+	if *outPath != "" || *dataDir == "" {
+		if err := writeReport(report, *outPath, stdout); err != nil {
+			return exitError, err
+		}
+	}
 	var saved *record.Run
 	if *dataDir != "" {
 		run, err := saveRun(report, cfg, *dataDir, *gateAudit, started)
@@ -229,11 +249,6 @@ func runReport(ctx context.Context, command string, args []string, stdin io.Read
 		}
 		fmt.Fprintf(stderr, "vajra: saved run %s\n", run.ID)
 		saved = &run
-	}
-	if *outPath != "" || *dataDir == "" {
-		if err := writeReport(report, *outPath, stdout); err != nil {
-			return exitError, err
-		}
 	}
 	fmt.Fprintf(stderr, "vajra: %d confirmed, %d unconfirmed, %d refuted, %d out of scope\n",
 		report.Summary[finding.Confirmed], report.Summary[finding.Unconfirmed],

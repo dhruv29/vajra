@@ -79,8 +79,13 @@ func TestCompareClassifiesOneFindingByItsStatusInEachRun(t *testing.T) {
 			if fmt.Sprint(got) != fmt.Sprint(want) {
 				t.Fatalf("new, resolved, persisting, changed = %v; want %v", got, want)
 			}
-			if d.HasNew() != tt.wantNew {
-				t.Errorf("HasNew = %v; want %v", d.HasNew(), tt.wantNew)
+			// The gate also fails when a finding becomes confirmed.
+			escalated := tt.wantChanged && tt.head == finding.Confirmed
+			if got := len(d.Escalated()) == 1; got != escalated {
+				t.Errorf("escalated = %v; want %v", got, escalated)
+			}
+			if d.HasNew() != (tt.wantNew || escalated) {
+				t.Errorf("HasNew = %v; want %v", d.HasNew(), tt.wantNew || escalated)
 			}
 			for _, c := range append(append(append(d.New, d.Resolved...), d.Persisting...), d.StatusChanged...) {
 				if c.Before != tt.base || c.After != tt.head {
@@ -184,7 +189,7 @@ func TestMarkdownSummarisesWhatChanged(t *testing.T) {
 	for _, want := range []string{
 		"Base 20261120-010101-aaaaaaaa, head 20261121-010101-bbbbbbbb.",
 		"**1 new**, 1 resolved, 2 persisting (1 changed status).",
-		"#### New (1)", "- **confirmed**, was not reported, score 72: title fresh in 20261121-010101-bbbbbbbb at https://app.test/fresh (fresh)",
+		"#### New (1)", "- **confirmed**, was not reported, score 72: title fresh in 20261121-010101-bbbbbbbb at https\\://app.test/fresh (fresh)",
 		"#### Status changed (1)", "- **confirmed**, was unconfirmed, score 55: title stays",
 		"#### Resolved (1)", "- **no longer reported**, was confirmed, score 31: title gone in 20261120-010101-aaaaaaaa",
 	} {
@@ -220,9 +225,9 @@ func TestMarkdownEscapesUntrustedText(t *testing.T) {
 	got := Compare(record.Run{ID: "base"}, head).Markdown()
 
 	for _, want := range []string{
-		`x\</td\>\<script\>alert\(1\)\</script\>  \# Owned - \[click\]\(http://evil.test\) \!\[i\]\(http://evil.test/p.png\) \*\*b\*\* \_i\_ ` + "\\`c\\` \\~s\\~ \\@org/team \\&lt;",
+		`x\</td\>\<script\>alert\(1\)\</script\>  \# Owned - \[click\]\(http\://evil.test\) \!\[i\]\(http\://evil.test/p.png\) \*\*b\*\* \_i\_ ` + "\\`c\\` \\~s\\~ \\@org/team \\&lt;",
 		`(id\|\<b\>)`,
-		`https://app.test/?q=\<img src=x onerror=alert\(1\)\>\|a b\\`,
+		`https\://app.test/?q=\<img src=x onerror=alert\(1\)\>\|a b\\`,
 		`Base base, head head \<h1\>.`,
 	} {
 		if !strings.Contains(got, want) {
@@ -265,6 +270,8 @@ func TestEscapeNeutralisesEachSpecialCharacter(t *testing.T) {
 		{"table cell", "a|b", `a\|b`},
 		{"heading and image", "# !", `\# \!`},
 		{"mention and entity", "@a &amp;", `\@a \&amp;`},
+		{"bare URL", "see https://evil.test/x", `see https\://evil.test/x`},
+		{"format characters are dropped", "a\u202eb\u200bc\u2066d\ufeff", "abcd"},
 		{"newlines become spaces", "a\nb\r\nc\td", "a b  c d"},
 		{"unicode line separators become spaces", "a\u2028b\u2029c\u0085d", "a b c d"},
 		{"long text is cut", strings.Repeat("é", maxTextRunes+5), strings.Repeat("é", maxTextRunes) + ellipsis},
@@ -288,5 +295,33 @@ func TestMarkdownCapsLongLists(t *testing.T) {
 
 	if !strings.Contains(got, "#### New (23)") || !strings.Contains(got, "- and 3 more\n") || strings.Count(got, "\n- ") != maxListed+1 {
 		t.Fatalf("markdown = %s", got)
+	}
+}
+
+func TestAFindingThatBecameConfirmedFailsTheGate(t *testing.T) {
+	base := run("base", scored{"up", finding.Unconfirmed, 10}, scored{"down", finding.Confirmed, 20}, scored{"same", finding.Confirmed, 5})
+	head := run("head", scored{"up", finding.Confirmed, 30}, scored{"down", finding.Unconfirmed, 20}, scored{"same", finding.Confirmed, 5})
+
+	d := Compare(base, head)
+
+	if len(d.New) != 0 || !d.HasNew() {
+		t.Fatalf("new = %d, HasNew = %v; an escalation alone must fail the gate", len(d.New), d.HasNew())
+	}
+	if got := ids(d.Escalated()); got != "up" {
+		t.Fatalf("escalated = %s; want only the finding that became confirmed", got)
+	}
+	if md := d.Markdown(); !strings.Contains(md, "**1 finding(s) became confirmed.**") {
+		t.Fatalf("markdown does not mention the escalation:\n%s", md)
+	}
+}
+
+func TestADowngradeAloneDoesNotFailTheGate(t *testing.T) {
+	d := Compare(run("base", scored{"down", finding.Confirmed, 20}), run("head", scored{"down", finding.Unconfirmed, 20}))
+
+	if d.HasNew() || len(d.Escalated()) != 0 || d.Escalated() == nil {
+		t.Fatalf("HasNew = %v, escalated = %v; want false and an empty list", d.HasNew(), d.Escalated())
+	}
+	if md := d.Markdown(); strings.Contains(md, "became confirmed") {
+		t.Fatalf("markdown mentions an escalation that did not happen:\n%s", md)
 	}
 }

@@ -14,6 +14,15 @@ const (
 	// maxSchemaDepth is how many levels of objects and arrays a synthesised
 	// example may nest. It also ends schemas that contain themselves.
 	maxSchemaDepth = 3
+	// maxSchemaVisits is the work one Parse may spend expanding schemas, shared
+	// by every operation. Depth limits alone do not bound it: allOf fan-out
+	// and wide objects whose properties refer back multiply at every level, so
+	// a small hostile document could otherwise keep Parse busy for hours. When
+	// it runs out, bodies are left smaller or without an example.
+	maxSchemaVisits = 100_000
+	// maxExampleProperties is how many properties a synthesised object gets.
+	// An example shows the shape of a body; it need not list every field.
+	maxExampleProperties = 50
 
 	localRefPrefix = "#/"
 	jsonMediaType  = "application/json"
@@ -97,6 +106,9 @@ func (p parser) declaredExample(holder map[string]any) (any, bool) {
 // synthesise builds a small example value from a schema. It reports false
 // when the schema is too vague or too deep to say anything about.
 func (p parser) synthesise(node any, depth int) (any, bool) {
+	if !p.spend(1) {
+		return nil, false
+	}
 	schema := p.resolve(node)
 	if schema == nil {
 		return nil, false
@@ -157,14 +169,21 @@ func (p parser) synthesiseArray(schema map[string]any, depth int) (any, bool) {
 	return []any{}, true
 }
 
-// synthesiseObject fills in the properties that can be synthesised. Read-only
-// properties are left out, because a request must not send them.
+// synthesiseObject fills in the properties that can be synthesised, at most
+// maxExampleProperties of them, first by name so the example is the same from
+// run to run. Read-only properties are left out, because a request must not
+// send them.
 func (p parser) synthesiseObject(schema map[string]any, depth int) (any, bool) {
 	if depth > maxSchemaDepth {
 		return nil, false
 	}
 	out := map[string]any{}
-	for name, property := range p.properties(schema, maxRefDepth) {
+	properties := p.properties(schema, maxRefDepth)
+	for _, name := range sortedKeys(properties) {
+		if len(out) == maxExampleProperties {
+			break
+		}
+		property := properties[name]
 		if readOnly, _ := p.resolve(property)["readOnly"].(bool); readOnly {
 			continue
 		}
@@ -176,10 +195,11 @@ func (p parser) synthesiseObject(schema map[string]any, depth int) (any, bool) {
 }
 
 // properties collects the properties of a schema and of the schemas it
-// combines with allOf. budget bounds how deep allOf may nest.
+// combines with allOf. budget bounds how deep allOf may nest; the shared
+// work budget bounds how much is collected in all.
 func (p parser) properties(schema map[string]any, budget int) map[string]any {
 	out := map[string]any{}
-	if budget == 0 {
+	if budget == 0 || !p.spend(1+len(object(schema["properties"]))) {
 		return out
 	}
 	for _, part := range list(schema["allOf"]) {
@@ -191,6 +211,16 @@ func (p parser) properties(schema map[string]any, budget int) map[string]any {
 		out[name] = property
 	}
 	return out
+}
+
+// spend takes cost from the work budget of this Parse, and reports false,
+// taking nothing, when there is not enough left.
+func (p parser) spend(cost int) bool {
+	if *p.work < cost {
+		return false
+	}
+	*p.work -= cost
+	return true
 }
 
 // stringify renders an example value the way it would be written in a URL.

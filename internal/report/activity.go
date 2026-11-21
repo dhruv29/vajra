@@ -94,7 +94,7 @@ func writeList(b *strings.Builder, title string, list capped[string]) {
 	}
 	fmt.Fprintf(b, "**%s (%d).**\n\n", title, len(list.Rows)+list.More)
 	for _, row := range list.Rows {
-		fmt.Fprintf(b, "- %s\n", md(row))
+		fmt.Fprintf(b, "- %s\n", mdParagraph(row))
 	}
 	if list.More > 0 {
 		fmt.Fprintf(b, "- and %d more\n", list.More)

@@ -132,7 +132,12 @@ func NewClient(opts Options) (*Client, error) {
 		c.baseURL = defaultBaseURL
 	}
 	if c.http == nil {
-		c.http = &http.Client{Timeout: requestTimeout}
+		c.http = &http.Client{
+			Timeout: requestTimeout,
+			// The API key travels in a header that is not dropped on a
+			// redirect to another host, so redirects are never followed.
+			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+		}
 	}
 	return c, nil
 }

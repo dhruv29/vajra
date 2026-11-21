@@ -37,6 +37,17 @@ type socksFixture struct {
 // starts serving.
 func newSOCKSFixture(t *testing.T, upstream string, sink Sink, configure func(*SOCKS5)) socksFixture {
 	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return serveSOCKS(t, upstream, sink, configure, listener)
+}
+
+// serveSOCKS is newSOCKSFixture with the listener given, so a test can put a
+// fake one in front of the real socket.
+func serveSOCKS(t *testing.T, upstream string, sink Sink, configure func(*SOCKS5), listener net.Listener) socksFixture {
+	t.Helper()
 	policy, err := scope.New(scope.Config{
 		Hosts: []string{"app.test", "rebind.test", "mixed.test"},
 		CIDRs: []string{"2001:db8::/32"},
@@ -59,10 +70,6 @@ func newSOCKSFixture(t *testing.T, upstream string, sink Sink, configure func(*S
 	}
 	if configure != nil {
 		configure(server)
-	}
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	done, serveErr := make(chan struct{}), new(error)
@@ -615,4 +622,120 @@ func TestNewSOCKS5RequiresItsDependencies(t *testing.T) {
 	if s, err := NewSOCKS5(guard, &MemorySink{}); err != nil || s.handshakeTimeout != socksHandshakeTimeout || s.tunnelIdle != tunnelIdleTimeout {
 		t.Errorf("NewSOCKS5 = %+v, %v; want the default timeouts", s, err)
 	}
+}
+
+// temporaryError is an accept error that goes away by itself, like EMFILE.
+type temporaryError struct{}
+
+func (temporaryError) Error() string   { return "accept: too many open files" }
+func (temporaryError) Temporary() bool { return true }
+func (temporaryError) Timeout() bool   { return false }
+
+// flakyListener fails Accept with a temporary error the first failures times,
+// or always when failures is negative, before handing out real connections.
+type flakyListener struct {
+	net.Listener
+	mu       sync.Mutex
+	failures int
+	failed   int
+}
+
+func (l *flakyListener) Accept() (net.Conn, error) {
+	l.mu.Lock()
+	fail := l.failures < 0 || l.failed < l.failures
+	if fail {
+		l.failed++
+	}
+	l.mu.Unlock()
+	if fail {
+		return nil, &net.OpError{Op: "accept", Net: "tcp", Err: temporaryError{}}
+	}
+	return l.Listener.Accept()
+}
+
+func TestSOCKS5KeepsServingAfterTemporaryAcceptErrors(t *testing.T) {
+	inner, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := serveSOCKS(t, echoServer(t), nil, nil, &flakyListener{Listener: inner, failures: 4})
+	conn := f.dial(t)
+	greet(t, conn)
+
+	code := replyCode(t, conn, domainRequest(0x01, "app.test", 443))
+
+	if code != 0x00 {
+		t.Fatalf("reply code = %#02x; want success after the accept errors passed", code)
+	}
+	select {
+	case <-f.done:
+		t.Fatalf("Serve returned %v after a temporary accept error", *f.serveErr)
+	default:
+	}
+}
+
+func TestSOCKS5ServeReturnsNilWhenCancelledWhileWaitingOutAcceptErrors(t *testing.T) {
+	inner, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := serveSOCKS(t, echoServer(t), nil, nil, &flakyListener{Listener: inner, failures: -1})
+	time.Sleep(3 * socksAcceptRetryMin) // let Serve reach its backoff
+
+	f.cancel()
+
+	if err := f.stopped(t); err != nil {
+		t.Fatalf("Serve = %v; want nil after its context was cancelled", err)
+	}
+}
+
+func TestSOCKS5RefusesConnectionsBeyondTheLimit(t *testing.T) {
+	f := newSOCKSFixture(t, echoServer(t), nil, func(s *SOCKS5) { s.maxConns = 2 })
+	first, second := f.dial(t), f.dial(t)
+	greet(t, first)
+	greet(t, second)
+
+	extra := f.dial(t)
+
+	expectClosed(t, extra)
+	if code := replyCode(t, first, domainRequest(0x01, "app.test", 443)); code != 0x00 {
+		t.Fatalf("reply code = %#02x; a connection within the limit must still be served", code)
+	}
+	payload := []byte("still here")
+	if _, err := first.Write(payload); err != nil {
+		t.Fatal(err)
+	}
+	echoed := make([]byte, len(payload))
+	if _, err := io.ReadFull(first, echoed); err != nil || !bytes.Equal(echoed, payload) {
+		t.Fatalf("echo = %q, err = %v", echoed, err)
+	}
+	second.Close()
+	if err := waitForSlot(f); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// waitForSlot dials until a connection is served again, which shows a slot is
+// given back when a connection ends. It polls because the server notices the
+// close at a time of its own.
+func waitForSlot(f socksFixture) error {
+	deadline := time.Now().Add(socksTestDeadline)
+	for time.Now().Before(deadline) {
+		conn, err := net.Dial("tcp", f.addr)
+		if err != nil {
+			return err
+		}
+		_ = conn.SetDeadline(time.Now().Add(time.Second))
+		_, err = conn.Write([]byte{0x05, 0x01, 0x00})
+		var choice [2]byte
+		if err == nil {
+			_, err = io.ReadFull(conn, choice[:])
+		}
+		conn.Close()
+		if err == nil {
+			return nil
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	return errors.New("no connection was served after one within the limit closed")
 }

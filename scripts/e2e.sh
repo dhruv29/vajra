@@ -10,8 +10,9 @@
 #   5. the saved run renders as reports with a blast radius,
 #   6. a result that no longer reproduces is refuted only if the target answers,
 #   7. code analysis finds a planted injection and ignores the safe variant,
-#   8. access checks, API tests and the secret search find planted flaws, and
-#      no credential or full secret reaches a report.
+#   8. access checks, API tests, GraphQL checks, port discovery and the secret
+#      search find planted flaws, and no credential or full secret reaches a
+#      report.
 #
 # Set E2E_REFUTER=anthropic (with ANTHROPIC_API_KEY) to also have a live model
 # review the findings and to score the result against bench/lab.json.
@@ -66,7 +67,7 @@ docker run -d --name "$TARGET" --network "$LAB_NET" --network-alias target \
 cat > "$WORK/run.json" <<EOF
 {
   "authorization": {"operator": "e2e", "statement": "Local lab target created by scripts/e2e.sh"},
-  "scope": {"hosts": ["target"], "cidrs": ["$LAB_SUBNET"], "ports": [80]},
+  "scope": {"hosts": ["target"], "cidrs": ["$LAB_SUBNET"], "ports": [80, 8081]},
   "budget": {"tokens": 100000, "turns": 20, "sandbox_runs": 20, "duration_seconds": 1200},
   "targets": ["http://target"],
   "sandbox": {"network": "$TASK_NET", "proxy_url": "http://gate:3128"},
@@ -95,7 +96,7 @@ docker create --name "$GATE" --network "$TASK_NET" --network-alias gate \
   --read-only --cap-drop ALL --security-opt no-new-privileges \
   -v "$WORK/run.json:/etc/vajra/run.json:ro" \
   -v "$WORK/audit:/var/log/vajra" \
-  vajra:local gate -config /etc/vajra/run.json -listen :3128 -audit /var/log/vajra/audit.jsonl >/dev/null
+  vajra:local gate -config /etc/vajra/run.json -listen :3128 -socks :1080 -audit /var/log/vajra/audit.jsonl >/dev/null
 docker network connect "$LAB_NET" "$GATE"
 docker network connect "$OUT_NET" "$GATE"
 docker start "$GATE" >/dev/null
@@ -233,6 +234,13 @@ server {
   # Broken on purpose: the description says this needs authentication.
   location = /api/orders { default_type application/json; return 200 '{"orders":[{"id":1,"total":42}]}'; }
   location = /api/health { default_type application/json; return 200 '{"ok":true}'; }
+  # Left open on purpose: anyone can read the whole schema.
+  location = /graphql { default_type application/json; return 200 '{"data":{"__schema":{"queryType":{"name":"Query"},"types":[{"name":"Query","kind":"OBJECT"},{"name":"Order","kind":"OBJECT"}]}}}'; }
+}
+# A second service on a port the operator does not expect to be open.
+server {
+  listen 8081;
+  location / { return 200 'internal admin console'; }
 }
 NGINXEOF
 chmod -R a+rX "$WORK/app" "$WORK/nginx.conf"
@@ -262,10 +270,12 @@ chmod -R a+rX "$WORK/src2"
 cat > "$WORK/full.json" <<EOF
 {
   "authorization": {"operator": "e2e", "statement": "Local lab target created by scripts/e2e.sh"},
-  "scope": {"hosts": ["target"], "cidrs": ["$LAB_SUBNET"], "ports": [80]},
+  "scope": {"hosts": ["target"], "cidrs": ["$LAB_SUBNET"], "ports": [80, 8081]},
   "budget": {"tokens": 200000, "turns": 40, "sandbox_runs": 60, "duration_seconds": 1200},
-  "sandbox": {"network": "$TASK_NET", "proxy_url": "http://gate:3128"},
+  "sandbox": {"network": "$TASK_NET", "proxy_url": "http://gate:3128", "socks_addr": "gate:1080"},
   "probe": {"image": "vajra:local", "timeout_seconds": 120},
+  "graphql": {"endpoint": "http://target/graphql"},
+  "ports": {"hosts": ["target"], "ports": [80, 8081], "expected": [80], "timeout_seconds": 60},
   "auth": {
     "identities": [
       {"name": "admin", "headers_env": {"Authorization": "VAJRA_E2E_ADMIN"}},
@@ -293,7 +303,17 @@ grep -q '"rule_id": "aws-access-key-id"' "$full" || fail "the hard-coded key was
 grep -q "$fake_key" "$full" && fail "the full secret value is in the report"
 grep -q 'lab-user-token\|lab-admin-token' "$full" && fail "a test account's credential is in the report"
 grep -q 'lab-user-token\|lab-admin-token' "$WORK"/data/runs/*.json && fail "a test account's credential is in a saved run"
+grep -q '"rule_id": "graphql-introspection-enabled"' "$full" || fail "open GraphQL introspection was not reported"
+grep -q '"target": "tcp://target:8081"' "$full" || fail "the unexpected service on port 8081 was not reported"
+grep -q '"target": "tcp://target:80"' "$full" && fail "the expected port 80 was reported as unexpected"
+python3 - "$full" <<'PYEOF' || fail "the open port must be confirmed by a second connection, with no reviewer needed"
+import json, sys
+findings = json.load(open(sys.argv[1]))["findings"]
+port = [f for f in findings if f["rule_id"] == "unexpected-open-port"]
+sys.exit(0 if len(port) == 1 and port[0]["status"] == "confirmed" else 1)
+PYEOF
 pass "an ordinary user reaching the admin page, an unprotected API operation and a hard-coded key were all found"
+pass "open GraphQL introspection was found, and an unexpected open port was found and confirmed through the SOCKS5 gate"
 pass "no credential and no full secret appears in the report or the saved runs"
 if [ -n "${E2E_KEEP:-}" ]; then cp "$full" "$E2E_KEEP/"; fi
 

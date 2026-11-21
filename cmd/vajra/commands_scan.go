@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"io/fs"
@@ -110,7 +111,68 @@ func withOperatorControls(deps app.Deps, cfg config.Config, dataDir string, stdi
 		return deps, err
 	}
 	deps.Stop = stopRequested(dataDir)
+	// A pause file is not cleared: a scan started while paused waits for
+	// "vajra resume", which is what pausing ahead of time is for.
+	deps.Pause = fileExists(filepath.Join(dataDir, pauseFileName))
 	return deps, nil
+}
+
+// pauseFileName is the file whose presence pauses a scan's explorer.
+const pauseFileName = "PAUSE"
+
+// fileExists returns a function that reports whether path exists.
+func fileExists(path string) func() bool {
+	return func() bool {
+		_, err := os.Stat(path)
+		return err == nil
+	}
+}
+
+// runPause creates the pause file; runResume removes it.
+func runPause(args []string, stdout, stderr io.Writer) error {
+	dataDir, err := dataDirFlag("pause", args, stderr)
+	if err != nil {
+		return err
+	}
+	path := filepath.Join(dataDir, pauseFileName)
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY, stopFileMode)
+	if err != nil {
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	fmt.Fprintf(stdout, "created %s; the explorer waits after its current step until \"vajra resume\". The run's time limit keeps counting.\n", path)
+	return nil
+}
+
+func runResume(args []string, stdout, stderr io.Writer) error {
+	dataDir, err := dataDirFlag("resume", args, stderr)
+	if err != nil {
+		return err
+	}
+	path := filepath.Join(dataDir, pauseFileName)
+	if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
+	fmt.Fprintf(stdout, "removed %s; a paused explorer continues\n", path)
+	return nil
+}
+
+func dataDirFlag(command string, args []string, stderr io.Writer) (string, error) {
+	flags := flag.NewFlagSet(command, flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	dataDir := flags.String("data", "", "data directory the scan was started with (required)")
+	if err := flags.Parse(args); err != nil {
+		return "", err
+	}
+	if *dataDir == "" {
+		return "", errors.New("-data is required")
+	}
+	if info, err := os.Stat(*dataDir); err != nil || !info.IsDir() {
+		return "", fmt.Errorf("%s is not a directory", *dataDir)
+	}
+	return *dataDir, nil
 }
 
 func stopPath(dataDir string) string {

@@ -277,3 +277,52 @@ func TestTextOmitsUnexpectedLineAndStripsControlCharacters(t *testing.T) {
 		t.Errorf("control characters reached the terminal: %q", got)
 	}
 }
+
+func TestEachConfirmedFindingCountsForOneRealIssueAtMost(t *testing.T) {
+	real := Expectation{Name: "sql injection", Present: true, CWE: "cwe-89"}
+	sameIssue := Expectation{Name: "sql injection in search", Present: true, TargetContains: "/search"}
+	decoy := Expectation{Name: "decoy", Present: false, RuleContains: "sqli"}
+	tests := []struct {
+		name           string
+		key            []Expectation
+		findings       []finding.Finding
+		wantResults    []string
+		wantIDs        []string
+		wantUnexpected []string
+		wantPrecision  float64
+		wantRecall     float64
+	}{
+		{"a second confirmed finding for one issue is unexpected", []Expectation{real},
+			[]finding.Finding{sqli("f1", finding.Confirmed), sqli("f2", finding.Confirmed)},
+			[]string{TruePositive}, []string{"f1"}, []string{"f2"}, 0.5, 1},
+		{"one finding cannot satisfy two real issues", []Expectation{real, sameIssue},
+			[]finding.Finding{sqli("f1", finding.Confirmed)},
+			[]string{TruePositive, FalseNegative}, []string{"f1", ""}, []string{}, 1, 0.5},
+		{"two findings satisfy two real issues in key order", []Expectation{real, sameIssue},
+			[]finding.Finding{sqli("f1", finding.Confirmed), sqli("f2", finding.Confirmed)},
+			[]string{TruePositive, TruePositive}, []string{"f1", "f2"}, []string{}, 1, 1},
+		{"a false negative names an unconfirmed match, not a consumed one", []Expectation{real, sameIssue},
+			[]finding.Finding{sqli("f1", finding.Confirmed), sqli("f2", finding.Unconfirmed)},
+			[]string{TruePositive, FalseNegative}, []string{"f1", "f2"}, []string{}, 1, 0.5},
+		{"a surplus duplicate that matches a decoy is the decoy's false positive", []Expectation{real, decoy},
+			[]finding.Finding{sqli("f1", finding.Confirmed), sqli("f2", finding.Confirmed)},
+			[]string{TruePositive, FalsePositive}, []string{"f1", "f1"}, []string{}, 0.5, 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := Evaluate(Key{Name: "k", Expectations: tt.key}, tt.findings)
+
+			var results, ids []string
+			for _, o := range got.Outcomes {
+				results, ids = append(results, o.Result), append(ids, o.FindingID)
+			}
+			if !reflect.DeepEqual(results, tt.wantResults) || !reflect.DeepEqual(ids, tt.wantIDs) {
+				t.Fatalf("outcomes = %v %v; want %v %v", results, ids, tt.wantResults, tt.wantIDs)
+			}
+			if !reflect.DeepEqual(got.Unexpected, tt.wantUnexpected) || got.Precision != tt.wantPrecision || got.Recall != tt.wantRecall {
+				t.Fatalf("unexpected = %v, precision = %v, recall = %v; want %v, %v, %v",
+					got.Unexpected, got.Precision, got.Recall, tt.wantUnexpected, tt.wantPrecision, tt.wantRecall)
+			}
+		})
+	}
+}

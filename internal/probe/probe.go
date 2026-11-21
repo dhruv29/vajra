@@ -100,6 +100,11 @@ func (b Batch) Validate() error {
 		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() == "" {
 			return fmt.Errorf("probe: request %q: %q is not an http(s) URL", r.ID, r.URL)
 		}
+		// Credentials in a URL would be sent as a header nobody asked for, and
+		// would be written into evidence with the URL.
+		if u.User != nil {
+			return fmt.Errorf("probe: request %q: a URL may not carry a user name or password", r.ID)
+		}
 		if len(r.Body) > MaxRequestBodyBytes {
 			return fmt.Errorf("probe: request %q: body is too large", r.ID)
 		}
@@ -159,12 +164,22 @@ func do(ctx context.Context, client *http.Client, r Request) Response {
 		return resp
 	}
 	defer httpResp.Body.Close()
-	body, _ := io.ReadAll(io.LimitReader(httpResp.Body, MaxBodyBytes+1))
+	body, readErr := io.ReadAll(io.LimitReader(httpResp.Body, MaxBodyBytes+1))
 	if len(body) > MaxBodyBytes {
 		body, resp.BodyTruncated = body[:MaxBodyBytes], true
 	}
 	resp.Status, resp.Body = httpResp.StatusCode, string(body)
-	resp.Gate = httpResp.Header.Get(gateHeader)
+	if readErr != nil {
+		// A response cut off mid-body is not an answer: reporting it as a
+		// complete 200 would let a failing target look like a served page.
+		resp.Error = "the response ended before its body was complete: " + describe(readErr)
+	}
+	// Only a plain-HTTP response can have been written by the gate. HTTPS
+	// goes through a tunnel the gate cannot write into, so there the header
+	// can only come from the target, pretending.
+	if strings.HasPrefix(r.URL, "http://") {
+		resp.Gate = httpResp.Header.Get(gateHeader)
+	}
 	httpResp.Header.Del(gateHeader)
 	resp.Headers = httpResp.Header
 	resp.DurationMS = time.Since(started).Milliseconds()

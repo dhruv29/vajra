@@ -69,8 +69,13 @@ func extract(body string, pageURL *url.URL) extraction {
 		}
 	}
 	closeForm()
+	// Only a GET form's action is a link. Fetching the action of a POST form
+	// with the operator's session could submit it, or at least act on a route
+	// meant to change state.
 	for _, form := range out.forms {
-		out.links = append(out.links, form.Action)
+		if form.Method == http.MethodGet {
+			out.links = append(out.links, form.Action)
+		}
 	}
 	return out
 }

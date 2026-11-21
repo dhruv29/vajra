@@ -18,6 +18,7 @@ import (
 
 	"github.com/dhruv29/vajra/internal/finding"
 	"github.com/dhruv29/vajra/internal/probe"
+	"github.com/dhruv29/vajra/internal/redact"
 )
 
 const (
@@ -124,6 +125,17 @@ func (c *Checker) SecretHeaders() []string {
 	return out
 }
 
+// secretValues lists the credential values of every identity.
+func (c *Checker) secretValues() []string {
+	var out []string
+	for _, id := range c.identities {
+		for _, value := range id.Headers {
+			out = append(out, value)
+		}
+	}
+	return out
+}
+
 // Run performs every check as every identity and returns a candidate finding
 // for each identity that was served something it is not allowed.
 func (c *Checker) Run(ctx context.Context) ([]finding.Finding, error) {
@@ -220,8 +232,10 @@ func (c *Checker) finding(check Check, id Identity, got, baseline probe.Response
 		Tags:     []string{"access-control"},
 		Status:   finding.Candidate,
 		Evidence: finding.Evidence{
-			Request:   probe.FormatRequest(c.request("", check, id), c.SecretHeaders()),
-			Response:  probe.FormatResponse(got),
+			Request: probe.FormatRequest(c.request("", check, id), c.SecretHeaders()),
+			// A page that echoes request headers would otherwise put the
+			// account's credential into the evidence.
+			Response:  redact.Values(probe.FormatResponse(got), c.secretValues()...),
 			MatchedAt: check.URL,
 			Matcher:   id.Name,
 			Extracted: []string{comparison},

@@ -49,7 +49,9 @@ var skippedDirs = map[string]bool{
 var errNotScanned = errors.New("not scanned")
 
 // Scan walks the tree under root and returns one candidate finding per secret
-// found. Findings are sorted by file, then line, so the output is stable.
+// found. Findings are sorted by file, then line, so the output is stable. At
+// most maxFindingsPerFile come from one file and maxFindingsPerScan in all;
+// past that the walk stops, without an error, with what it has.
 func Scan(root string) ([]finding.Finding, error) {
 	return scanTree(root, maxFiles)
 }
@@ -87,6 +89,10 @@ func scanTree(rootDir string, fileLimit int) ([]finding.Finding, error) {
 			return err
 		}
 		findings = append(findings, found...)
+		if len(findings) >= maxFindingsPerScan {
+			findings = findings[:maxFindingsPerScan]
+			return fs.SkipAll
+		}
 		return nil
 	})
 	if err != nil {

@@ -77,6 +77,8 @@ const (
 	// Dependency findings are known vulnerabilities in third-party packages
 	// the project depends on.
 	Dependency Kind = "sca"
+	// Network findings are facts about what is listening on a host.
+	Network Kind = "net"
 )
 
 // Location is a place in source code, relative to the scanned source root.

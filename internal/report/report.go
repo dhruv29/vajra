@@ -13,6 +13,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/dhruv29/vajra/internal/blast"
 	"github.com/dhruv29/vajra/internal/finding"
@@ -104,7 +106,11 @@ func clip(s string) string {
 	if len(s) <= maxEvidenceChars {
 		return s
 	}
-	return s[:maxEvidenceChars] + truncationNote
+	cut := maxEvidenceChars
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut-- // never cut inside a multi-byte character
+	}
+	return s[:cut] + truncationNote
 }
 
 // kindLabel says how a finding was found. Findings recorded before kinds
@@ -117,6 +123,8 @@ func kindLabel(k finding.Kind) string {
 		return "code analysis"
 	case finding.Dependency:
 		return "dependency"
+	case finding.Network:
+		return "network"
 	default:
 		return label(k)
 	}
@@ -159,11 +167,42 @@ func HTML(run record.Run) ([]byte, error) {
 // or HTML when untrusted text is placed inline.
 var mdEscaper = strings.NewReplacer(
 	"\\", "\\\\", "`", "\\`", "*", "\\*", "_", "\\_", "[", "\\[", "]", "\\]",
-	"<", "&lt;", ">", "&gt;", "|", "\\|", "#", "\\#", "!", "\\!",
-	"\r", " ", "\n", " ",
+	"<", "&lt;", ">", "&gt;", "|", "\\|", "#", "\\#", "!", "\\!", "~", "\\~",
+	"\r", " ", "\n", " ", "\t", " ",
 )
 
-func md(s string) string { return mdEscaper.Replace(s) }
+// md escapes untrusted text for inline use. Control characters other than
+// line breaks and tabs, and format characters such as bidirectional overrides
+// and zero-width spaces, are dropped.
+func md(s string) string {
+	return mdEscaper.Replace(strings.Map(func(r rune) rune {
+		if (unicode.Is(unicode.Cc, r) && r != '\r' && r != '\n' && r != '\t') || unicode.Is(unicode.Cf, r) {
+			return -1
+		}
+		return r
+	}, s))
+}
+
+// mdParagraph escapes untrusted text written at the start of a line, where a
+// leading list marker, quote marker or indent would otherwise start a block.
+func mdParagraph(s string) string {
+	out := strings.TrimLeft(md(s), " ")
+	if out == "" {
+		return out
+	}
+	switch out[0] {
+	case '-', '+', '>':
+		return "\\" + out
+	}
+	digits := 0
+	for digits < len(out) && out[digits] >= '0' && out[digits] <= '9' {
+		digits++
+	}
+	if digits > 0 && digits < len(out) && (out[digits] == '.' || out[digits] == ')') {
+		return out[:digits] + "\\" + out[digits:]
+	}
+	return out
+}
 
 // fenced wraps untrusted text in a code fence longer than any run of
 // backticks inside it, so the text cannot close the fence early.
@@ -238,7 +277,7 @@ func writeChains(b *strings.Builder, chains []blast.Chain) {
 	b.WriteString("## Attack chains\n\n")
 	b.WriteString("Confirmed findings that combine: each step becomes possible from somewhere the step before it reaches.\n\n")
 	for i, c := range chains {
-		fmt.Fprintf(b, "### Chain %d: score %d / 100\n\n%s\n\n", i+1, c.Score, md(c.Summary))
+		fmt.Fprintf(b, "### Chain %d: score %d / 100\n\n%s\n\n", i+1, c.Score, mdParagraph(c.Summary))
 		b.WriteString("| Step | Finding | Capability | Why |\n|---|---|---|---|\n")
 		for n, step := range c.Steps {
 			fmt.Fprintf(b, "| %d | %s | %s | %s |\n", n+1, md(stepTitle(step)), md(label(step.Capability)), md(step.Why))
@@ -273,7 +312,7 @@ func writeFinding(b *strings.Builder, n int, it item) {
 	}
 	b.WriteString("\n")
 	if f.Description != "" {
-		fmt.Fprintf(b, "%s\n\n", md(f.Description))
+		fmt.Fprintf(b, "%s\n\n", mdParagraph(f.Description))
 	}
 
 	fmt.Fprintf(b, "**Blast radius.** %s Classified as %s: %s.\n\n", md(radius.Summary), label(radius.Capability), md(radius.CapabilityBasis))

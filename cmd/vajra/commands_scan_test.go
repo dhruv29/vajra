@@ -339,3 +339,32 @@ func TestGateReleasesTheProxyPortWhenSOCKSCannotListen(t *testing.T) {
 		t.Fatalf("the proxy port %s was left open", proxy)
 	}
 }
+
+func TestPauseAndResumeToggleTheFileTheExplorerWatches(t *testing.T) {
+	data := t.TempDir()
+	paused := fileExists(filepath.Join(data, pauseFileName))
+
+	if code, stdout, stderr := invoke("pause", "-data", data); code != exitOK || !strings.Contains(stdout, "waits") {
+		t.Fatalf("pause: code = %d, stderr = %q", code, stderr)
+	}
+	if !paused() {
+		t.Fatal("pause did not create the file")
+	}
+	if info, _ := os.Stat(filepath.Join(data, pauseFileName)); info.Mode().Perm() != 0o600 {
+		t.Fatalf("pause file mode = %v", info.Mode().Perm())
+	}
+	if code, _, _ := invoke("pause", "-data", data); code != exitOK {
+		t.Fatal("pausing twice failed")
+	}
+	if code, _, _ := invoke("resume", "-data", data); code != exitOK || paused() {
+		t.Fatal("resume did not remove the file")
+	}
+	if code, _, _ := invoke("resume", "-data", data); code != exitOK {
+		t.Fatal("resuming when not paused failed")
+	}
+	for _, args := range [][]string{{"pause"}, {"resume"}, {"pause", "-data", filepath.Join(data, "missing")}} {
+		if code, _, stderr := invoke(args...); code == exitOK || stderr == "" {
+			t.Errorf("%v: code = %d", args, code)
+		}
+	}
+}

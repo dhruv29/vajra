@@ -41,3 +41,27 @@ func TestHeadersHandlesPlainNewlinesResponsesAndEmptyInput(t *testing.T) {
 		t.Fatalf("a header name was treated as a pattern: %q", got)
 	}
 }
+
+func TestValuesScrubsACredentialWhereverATargetEchoesIt(t *testing.T) {
+	secret := "Bearer lab-user-token-9f2c"
+	text := "HTTP 200\n\n{\n  \"headers\": {\n    \"Authorization\": \"Bearer lab-user-token-9f2c\"\n  },\n" +
+		"  \"url\": \"/cb?token=lab-user-token-9f2c\"\n}\nBearer of good news"
+
+	got := Values(text, secret, "session=abc12345xyz; theme=dark", "short")
+
+	if strings.Contains(got, "lab-user-token-9f2c") {
+		t.Fatalf("the token survived: %s", got)
+	}
+	if !strings.Contains(got, "Bearer of good news") || !strings.Contains(got, "token=[redacted]") {
+		t.Fatalf("ordinary text was damaged or a bare token was missed: %s", got)
+	}
+	if got := Values("cookie abc12345xyz sent", "session=abc12345xyz; theme=dark"); strings.Contains(got, "abc12345xyz") {
+		t.Fatalf("a cookie value was not scrubbed on its own: %s", got)
+	}
+	if got := Values("the word short stays", "short"); got != "the word short stays" {
+		t.Fatalf("a fragment below the minimum length was scrubbed: %s", got)
+	}
+	if Values("", secret) != "" || Values("nothing here") != "nothing here" {
+		t.Fatal("empty input or no secrets changed the text")
+	}
+}

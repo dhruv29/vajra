@@ -15,9 +15,13 @@ import (
 	"github.com/dhruv29/vajra/internal/llm"
 )
 
+// WindowLines is how many lines either side of the finding the model is
+// shown; a proposal may only change lines in that window.
+const WindowLines = 80
+
 const (
 	proposeTool   = "propose_fix"
-	windowLines   = 80
+	windowLines   = WindowLines
 	maxLabelBytes = 400
 	nonceBytes    = 16
 )

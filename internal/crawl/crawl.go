@@ -79,6 +79,11 @@ type Result struct {
 	Exchanges []probe.Exchange `json:"exchanges"`
 	// Truncated is true when MaxPages stopped the crawl with URLs still queued.
 	Truncated bool `json:"truncated"`
+	// Skipped are links the crawl would have followed but did not, because
+	// they look like they change state (log out, delete, revoke, ...) and the
+	// crawl sends the operator's session. They stay in Page.Links. Normalised,
+	// sorted and de-duplicated.
+	Skipped []string `json:"skipped"`
 }
 
 // crawler holds the state of one crawl.
@@ -106,7 +111,7 @@ func Crawl(ctx context.Context, fetcher probe.Fetcher, start []string, opts Opti
 	if err != nil {
 		return Result{}, err
 	}
-	result := Result{Pages: []Page{}, Exchanges: []probe.Exchange{}}
+	result := Result{Pages: []Page{}, Exchanges: []probe.Exchange{}, Skipped: []string{}}
 	for depth := 0; len(level) > 0; depth++ {
 		if err := ctx.Err(); err != nil {
 			return result, fmt.Errorf("crawl: stopped before depth %d: %w", depth, err)
@@ -123,13 +128,30 @@ func Crawl(ctx context.Context, fetcher probe.Fetcher, start []string, opts Opti
 			page := c.page(exchange, depth)
 			result.Pages = append(result.Pages, page)
 			if depth < opts.MaxDepth {
-				next = c.enqueue(next, page.Links)
+				follow, skipped := splitStateChanging(page.Links)
+				next = c.enqueue(next, follow)
+				if len(skipped) > 0 {
+					result.Skipped = slices.Compact(slices.Sorted(slices.Values(append(result.Skipped, skipped...))))
+				}
 			}
 		}
 		result.Exchanges = append(result.Exchanges, exchanges...)
 		level = next
 	}
 	return result, nil
+}
+
+// splitStateChanging separates the links that look safe to fetch from those
+// that look like they change state.
+func splitStateChanging(links []string) (follow, skipped []string) {
+	for _, target := range links {
+		if changesState(target) {
+			skipped = append(skipped, target)
+		} else {
+			follow = append(follow, target)
+		}
+	}
+	return follow, skipped
 }
 
 func validate(fetcher probe.Fetcher, opts Options) error {

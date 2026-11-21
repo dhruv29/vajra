@@ -350,13 +350,35 @@ func TestValidateNamesEachMissingSetting(t *testing.T) {
 	}
 }
 
-func TestConfiguredHeadersAreSentInAStableOrder(t *testing.T) {
-	s := newScanner(&fakeRunner{})
-	s.Headers = map[string]string{"X-Tenant": "t1", "Authorization": "Bearer abc"}
+func TestAccountHeadersReachTheScannerOnStandardInputNotTheCommandLine(t *testing.T) {
+	runner := &fakeRunner{result: sandbox.Result{Stdout: []byte(sampleOutput + "garbage line\n")}}
+	s := newScanner(runner)
+	s.Headers = map[string]string{"X-Tenant": "t1", "Authorization": "Bearer abc-secret"}
 
-	joined := strings.Join(s.baseArgs(s.TemplatesDir), "|")
+	if _, err := s.Scan(context.Background(), []string{"https://app.test"}); err != nil {
+		t.Fatal(err)
+	}
 
-	if !strings.Contains(joined, "-header|Authorization: Bearer abc|-header|X-Tenant: t1") {
-		t.Fatalf("args = %s", joined)
+	spec := runner.specs[0]
+	if strings.Contains(strings.Join(spec.Argv, " "), "abc-secret") || slices.Contains(spec.Argv, "-header") {
+		t.Fatalf("a credential is on the command line: %v", spec.Argv)
+	}
+	want := "header:\n  - \"Authorization: Bearer abc-secret\"\n  - \"X-Tenant: t1\"\n"
+	if string(spec.Stdin) != want || spec.Entrypoint != "sh" || spec.Argv[0] != "-c" || spec.Argv[2] != "nuclei" {
+		t.Fatalf("stdin = %q, entrypoint = %q, argv = %v", spec.Stdin, spec.Entrypoint, spec.Argv[:3])
+	}
+	if !slices.Contains(spec.Argv, "-jsonl") || !slices.Contains(spec.Argv, "https://app.test") {
+		t.Fatalf("the scanner arguments were lost: %v", spec.Argv)
+	}
+	if s.Skipped() != 3 {
+		t.Fatalf("skipped = %d; unreadable result lines must be counted", s.Skipped())
+	}
+
+	plain := &fakeRunner{result: sandbox.Result{}}
+	if _, err := newScanner(plain).Scan(context.Background(), []string{"https://app.test"}); err != nil {
+		t.Fatal(err)
+	}
+	if plain.specs[0].Entrypoint != "" || plain.specs[0].Stdin != nil {
+		t.Fatal("a scan without an account must run the scanner directly")
 	}
 }

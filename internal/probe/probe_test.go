@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -268,5 +269,60 @@ func TestFormattingRedactsCredentials(t *testing.T) {
 	}
 	if got := FormatResponse(Response{Error: "timeout"}); got != "no response: timeout" {
 		t.Fatalf("error response text = %q", got)
+	}
+}
+
+func TestAResponseCutOffMidBodyIsNotAnAnswer(t *testing.T) {
+	cut := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Length", "1000")
+		_, _ = io.WriteString(w, "partial")
+		if hj, ok := w.(http.Hijacker); ok {
+			conn, _, _ := hj.Hijack()
+			conn.Close()
+		}
+	}))
+	defer cut.Close()
+	client, _ := NewClient(cut.URL, false)
+
+	got := Execute(context.Background(), client, Batch{Requests: []Request{{ID: "a", Method: "GET", URL: "http://app.test/"}}}).Responses[0]
+
+	if got.Answered() || !strings.Contains(got.Error, "before its body was complete") {
+		t.Fatalf("response = %+v; a truncated body must not count as served", got)
+	}
+}
+
+func TestATargetCannotPoseAsTheGateOverHTTPS(t *testing.T) {
+	target := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set(gateHeader, "denied") // pretending the gate refused, to hide a finding
+		_, _ = io.WriteString(w, "secret page")
+	}))
+	defer target.Close()
+	// A minimal CONNECT proxy standing in for the gate.
+	gate := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstream, err := net.Dial("tcp", target.Listener.Addr().String())
+		if err != nil {
+			http.Error(w, "down", http.StatusBadGateway)
+			return
+		}
+		client, _, _ := w.(http.Hijacker).Hijack()
+		_, _ = io.WriteString(client, "HTTP/1.1 200 Connection Established\r\n\r\n")
+		go func() { _, _ = io.Copy(upstream, client); upstream.Close() }()
+		_, _ = io.Copy(client, upstream)
+		client.Close()
+	}))
+	defer gate.Close()
+	client, _ := NewClient(gate.URL, true)
+
+	got := Execute(context.Background(), client, Batch{Requests: []Request{{ID: "a", Method: "GET", URL: "https://app.test/"}}}).Responses[0]
+
+	if !got.Answered() || got.Gate != "" || got.Body != "secret page" {
+		t.Fatalf("response = %+v; over HTTPS the header can only come from the target and must be ignored", got)
+	}
+}
+
+func TestURLsWithCredentialsAreRefused(t *testing.T) {
+	batch := Batch{Requests: []Request{{ID: "a", Method: "GET", URL: "https://user:pw@app.test/"}}}
+	if err := batch.Validate(); err == nil {
+		t.Fatal("a URL carrying a password was accepted")
 	}
 }

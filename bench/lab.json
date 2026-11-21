@@ -4,6 +4,9 @@
     {"name": "Ordinary user is served the administration page", "present": true, "rule_contains": "unauthorized-access", "target_contains": "/admin/users"},
     {"name": "Orders API answers without authentication", "present": true, "rule_contains": "auth-not-enforced", "target_contains": "/api/orders"},
     {"name": "Access key in settings.py", "present": true, "rule_contains": "aws-access-key-id", "target_contains": "settings.py"},
+    {"name": "GraphQL schema readable by anyone", "present": true, "rule_contains": "graphql-introspection-enabled", "target_contains": "/graphql"},
+    {"name": "Unexpected service on port 8081", "present": true, "rule_contains": "unexpected-open-port", "target_contains": ":8081"},
+    {"name": "Web port 80 is expected", "present": false, "rule_contains": "unexpected-open-port", "target_contains": "target:80\""},
     {"name": "Account page refuses anonymous visitors", "present": false, "rule_contains": "unauthenticated-access", "target_contains": "/account"},
     {"name": "Health endpoint is public by design", "present": false, "rule_contains": "auth-not-enforced", "target_contains": "/api/health"}
   ]

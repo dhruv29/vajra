@@ -16,8 +16,9 @@ const (
 	maxTextRunes = 160
 	ellipsis     = "…"
 	// markdownSpecials are backslash-escaped so untrusted text stays literal:
-	// no markup, links, images, tables, headings, HTML, entities or mentions.
-	markdownSpecials = "\\`*_[]<>|#!~()@&"
+	// no markup, links, images, tables, headings, HTML, entities, mentions
+	// or autolinked URLs.
+	markdownSpecials = "\\`*_[]<>|#!~()@&:"
 	absentBefore     = "not reported"
 	absentAfter      = "no longer reported"
 )
@@ -31,6 +32,9 @@ func (d Diff) Markdown() string {
 	fmt.Fprintf(&b, "### Vajra run comparison\n\nBase %s, head %s.\n\n", escape(d.Base), escape(d.Head))
 	fmt.Fprintf(&b, "**%d new**, %d resolved, %d persisting (%d changed status).\n",
 		len(d.New), len(d.Resolved), len(d.Persisting), len(d.StatusChanged))
+	if n := len(d.Escalated()); n > 0 {
+		fmt.Fprintf(&b, "**%d finding(s) became confirmed.**\n", n)
+	}
 	section(&b, "New", d.New)
 	section(&b, "Status changed", d.StatusChanged)
 	section(&b, "Resolved", d.Resolved)
@@ -62,11 +66,14 @@ func status(s finding.Status, whenAbsent string) string {
 
 // escape makes untrusted text safe to place inside a line of Markdown. Line
 // breaks and other control characters become spaces so the text cannot start
-// a new block.
+// a new block; format characters such as bidirectional overrides and
+// zero-width spaces are dropped.
 func escape(s string) string {
 	var b strings.Builder
 	for _, r := range truncate(s) {
 		switch {
+		case unicode.Is(unicode.Cf, r):
+			continue
 		case unicode.IsControl(r) || r == '\u2028' || r == '\u2029':
 			b.WriteByte(' ')
 		case strings.ContainsRune(markdownSpecials, r):

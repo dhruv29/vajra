@@ -14,6 +14,7 @@ import (
 	"github.com/dhruv29/vajra/internal/config"
 	"github.com/dhruv29/vajra/internal/crawl"
 	"github.com/dhruv29/vajra/internal/finding"
+	"github.com/dhruv29/vajra/internal/nuclei"
 	"github.com/dhruv29/vajra/internal/osv"
 	"github.com/dhruv29/vajra/internal/recon"
 	"github.com/dhruv29/vajra/internal/redact"
@@ -34,7 +35,7 @@ func bytesReader(raw []byte) io.Reader { return bytes.NewReader(raw) }
 func (r *run) collect(ctx context.Context) ([]finding.Finding, error) {
 	var candidates []finding.Finding
 	stages := []func(context.Context) ([]finding.Finding, error){
-		r.discover, r.crawlTargets, r.scanTargets, r.checkAccess, r.testAPI,
+		r.discover, r.crawlTargets, r.scanTargets, r.checkAccess, r.testAPI, r.testGraphQL, r.findOpenPorts,
 		r.analyseCode, r.findSecrets, r.checkDependencies,
 	}
 	for _, stage := range stages {
@@ -93,14 +94,20 @@ func (r *run) inScope(rawURL string) bool {
 	return err == nil && r.policy.CheckTarget(host, port) == nil
 }
 
+// inAccountScope is the scope for anything that sends the scanning account's
+// credentials: in scope, and one of the hosts the account was issued for.
+func (r *run) inAccountScope(rawURL string) bool {
+	return r.inScope(rawURL) && r.accountMayReach(rawURL)
+}
+
 // crawlTargets follows links from the targets to learn the application's
 // endpoints.
 func (r *run) crawlTargets(ctx context.Context) ([]finding.Finding, error) {
 	if r.cfg.Crawl == nil || len(r.targets) == 0 {
 		return nil, nil
 	}
-	result, err := crawl.Crawl(ctx, r.fetcher, r.targets, crawl.Options{
-		MaxPages: r.cfg.Crawl.MaxPages, MaxDepth: r.cfg.Crawl.MaxDepth, InScope: r.inScope, Headers: r.scanHeaders,
+	result, err := crawl.Crawl(ctx, r.fetcher, r.cfg.Targets, crawl.Options{
+		MaxPages: r.cfg.Crawl.MaxPages, MaxDepth: r.cfg.Crawl.MaxDepth, InScope: r.inAccountScope, Headers: r.scanHeaders,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("crawl: %w", err)
@@ -117,11 +124,34 @@ func (r *run) crawlTargets(ctx context.Context) ([]finding.Finding, error) {
 	return nil, nil
 }
 
+// scanTargets runs the live scanner. With a scanning account, the targets the
+// operator listed are scanned as that account and any discovered hosts are
+// scanned without credentials.
 func (r *run) scanTargets(ctx context.Context) ([]finding.Finding, error) {
 	if r.nuclei == nil || len(r.targets) == 0 {
 		return nil, nil
 	}
-	return r.nuclei.Scan(ctx, r.targets)
+	groups := map[*nuclei.Scanner][]string{}
+	for _, target := range r.targets {
+		scanner := r.scannerFor(target)
+		groups[scanner] = append(groups[scanner], target)
+	}
+	var found []finding.Finding
+	for _, scanner := range []*nuclei.Scanner{r.nuclei, r.nucleiAnon} {
+		if scanner == nil || len(groups[scanner]) == 0 {
+			continue
+		}
+		before := scanner.Skipped()
+		results, err := scanner.Scan(ctx, groups[scanner])
+		if err != nil {
+			return nil, err
+		}
+		if skipped := scanner.Skipped() - before; skipped > 0 {
+			r.note("The scanner produced %d result line(s) that could not be read, for example because a response was too large. Those results are missing, so this scan is incomplete.", skipped)
+		}
+		found = append(found, results...)
+	}
+	return found, nil
 }
 
 func (r *run) checkAccess(ctx context.Context) ([]finding.Finding, error) {
@@ -141,6 +171,35 @@ func (r *run) testAPI(ctx context.Context) ([]finding.Finding, error) {
 	}
 	for _, skipped := range r.api.Skipped {
 		r.activity.SkippedOperations = append(r.activity.SkippedOperations, skipped.Operation+": "+skipped.Reason)
+	}
+	return found, nil
+}
+
+func (r *run) testGraphQL(ctx context.Context) ([]finding.Finding, error) {
+	if r.graphql == nil {
+		return nil, nil
+	}
+	return r.graphql.Run(ctx)
+}
+
+// findOpenPorts tries the configured hosts and ports through the gate and
+// reports the open ones the operator did not expect.
+func (r *run) findOpenPorts(ctx context.Context) ([]finding.Finding, error) {
+	if r.ports == nil {
+		return nil, nil
+	}
+	result, err := r.ports.Scan(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if len(result.Refused) > 0 {
+		r.note("The gate refused %d address(es) during port discovery, so they were not checked: %s.",
+			len(result.Refused), strings.Join(result.Refused, ", "))
+	}
+	found := make([]finding.Finding, 0, len(result.Findings))
+	for _, f := range result.Findings {
+		f.Kind = finding.Network
+		found = append(found, f)
 	}
 	return found, nil
 }
@@ -179,6 +238,9 @@ func (r *run) checkDependencies(ctx context.Context) ([]finding.Finding, error) 
 		r.note("No lockfile with pinned packages was found, so no dependencies were checked.")
 		return nil, nil
 	}
+	if err := r.budget.Check(); err != nil {
+		return nil, err
+	}
 	advisories, err := r.osv.client.Query(ctx, packages)
 	if err != nil {
 		return nil, fmt.Errorf("dependency lookup: %w", err)
@@ -201,10 +263,11 @@ func (r *run) explore(ctx context.Context, known []finding.Finding) ([]finding.F
 	}
 	var err error
 	r.explorer, err = agent.NewExplorer(agent.Options{
-		Model: r.model, Fetcher: r.fetcher, Budget: r.budget, InScope: r.inScope,
-		Approve: r.approver(), Stop: r.deps.Stop,
-		Headers: r.scanHeaders, SecretHeaders: r.secretHeaders,
-		MaxSteps: r.cfg.Agent.MaxSteps, Goal: r.goal(known), Targets: r.targets, Known: titles(known, finding.Dynamic),
+		Model: r.model, Fetcher: r.fetcher, Budget: r.budget, InScope: r.inAccountScope,
+		Approve: r.approver(), Stop: r.deps.Stop, Pause: r.deps.Pause,
+		Headers: r.scanHeaders, SecretHeaders: r.secretHeaders, SecretValues: r.secretValues,
+		MaxSteps: r.cfg.Agent.MaxSteps, Goal: r.cfg.Agent.Goal, Targets: r.cfg.Targets,
+		Leads: r.leads(known), Known: titles(known, finding.Dynamic),
 	})
 	if err != nil {
 		return nil, err
@@ -227,22 +290,21 @@ func (r *run) approver() agent.Approver {
 	return agent.DenyAll
 }
 
-// goal combines the operator's goal with leads from code analysis and
-// crawling, so the agent tries to demonstrate live what the code suggests.
-func (r *run) goal(known []finding.Finding) string {
-	var b strings.Builder
-	b.WriteString(r.cfg.Agent.Goal)
-	leads := titles(known, finding.Static)
-	if len(leads) > 0 {
-		b.WriteString(" Code analysis suggests these weaknesses; try to demonstrate them against the running service: ")
-		b.WriteString(strings.Join(leads, "; "))
-		b.WriteString(".")
+// leads are hints for the explorer from the other scanners: weaknesses that
+// code analysis suggests, to be demonstrated live, and pages the crawl found.
+// They are handed over as data, separate from the operator's own goal.
+func (r *run) leads(known []finding.Finding) []string {
+	var out []string
+	for _, title := range titles(known, finding.Static) {
+		out = append(out, "code analysis suggests: "+title)
 	}
-	if n := len(r.activity.Endpoints); n > 0 {
-		b.WriteString(" Pages found by crawling: ")
-		b.WriteString(strings.Join(r.activity.Endpoints[:min(n, maxLeads)], " "))
+	for i, endpoint := range r.activity.Endpoints {
+		if i >= maxLeads {
+			break
+		}
+		out = append(out, "page found by crawling: "+endpoint)
 	}
-	return b.String()
+	return out
 }
 
 func titles(findings []finding.Finding, kind finding.Kind) []string {
@@ -255,16 +317,60 @@ func titles(findings []finding.Finding, kind finding.Kind) []string {
 	return out
 }
 
-// redact removes credentials from the captured traffic of every finding
-// before it is verified, stored or shown to a model.
+// scrub removes every account's credential value from text.
+func (r *run) scrub(text string) string {
+	return redact.Values(text, r.secretValues...)
+}
+
+// redact removes credentials from every finding before it is verified, stored
+// or shown to a model: header lines by name, and the credential values
+// themselves wherever a target or a tool repeated them.
 func (r *run) redact(findings []finding.Finding) []finding.Finding {
 	out := make([]finding.Finding, 0, len(findings))
 	for _, f := range findings {
 		f.Evidence.Request = redact.Headers(f.Evidence.Request, r.secretHeaders...)
 		f.Evidence.Response = redact.Headers(f.Evidence.Response, r.secretHeaders...)
-		out = append(out, f)
+		out = append(out, r.scrubFinding(f))
 	}
 	return out
+}
+
+func (r *run) scrubFinding(f finding.Finding) finding.Finding {
+	if len(r.secretValues) == 0 {
+		return f
+	}
+	f.Title, f.Description = r.scrub(f.Title), r.scrub(f.Description)
+	e := f.Evidence
+	e.Request, e.Response, e.Code = r.scrub(e.Request), r.scrub(e.Response), r.scrub(e.Code)
+	e.MatchedAt, e.Matcher = r.scrub(e.MatchedAt), r.scrub(e.Matcher)
+	extracted := make([]string, 0, len(e.Extracted))
+	for _, value := range e.Extracted {
+		extracted = append(extracted, r.scrub(value))
+	}
+	e.Extracted = extracted
+	f.Evidence = e
+	verdicts := make([]finding.Verdict, 0, len(f.Verdicts))
+	for _, v := range f.Verdicts {
+		v.Reason = r.scrub(v.Reason)
+		verdicts = append(verdicts, v)
+	}
+	f.Verdicts = verdicts
+	return f
+}
+
+// scrubActivity removes credentials from what the run recorded about itself.
+func (r *run) scrubActivity() {
+	a := &r.activity
+	for i := range a.Notes {
+		a.Notes[i] = r.scrub(a.Notes[i])
+	}
+	for i := range a.Endpoints {
+		a.Endpoints[i] = r.scrub(a.Endpoints[i])
+	}
+	for i := range a.AgentSteps {
+		a.AgentSteps[i].Summary, a.AgentSteps[i].Outcome = r.scrub(a.AgentSteps[i].Summary), r.scrub(a.AgentSteps[i].Outcome)
+	}
+	a.AgentSummary = r.scrub(a.AgentSummary)
 }
 
 // corroborate links findings that show the same weakness on the same service

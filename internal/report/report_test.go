@@ -2,9 +2,11 @@ package report
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/dhruv29/vajra/internal/agent"
 	"github.com/dhruv29/vajra/internal/blast"
@@ -520,4 +522,132 @@ func TestReportsCapLongActivityLists(t *testing.T) {
 	doc, page = render(t, exact)
 	mustContain(t, doc, fmt.Sprintf("**Notes (%d).**", maxListRows), fmt.Sprintf("- note %03d\n", last))
 	mustNotContain(t, doc+page, " more")
+}
+
+// headingsOutsideFences returns the heading lines of doc that are not inside a
+// fenced code block opened with ``` or ~~~.
+func headingsOutsideFences(doc string) []string {
+	var headings []string
+	fence := ""
+	for _, line := range strings.Split(doc, "\n") {
+		trimmed := strings.TrimLeft(line, " ")
+		if len(line)-len(trimmed) <= 3 {
+			for _, marker := range []string{"```", "~~~"} {
+				if !strings.HasPrefix(trimmed, marker) {
+					continue
+				}
+				run := len(trimmed) - len(strings.TrimLeft(trimmed, marker[:1]))
+				switch {
+				case fence == "":
+					fence = strings.Repeat(marker[:1], run)
+				case strings.HasPrefix(fence, marker[:1]) && run >= len(fence) && strings.TrimSpace(trimmed[run:]) == "":
+					fence = ""
+				}
+			}
+		}
+		if fence == "" && strings.HasPrefix(line, "#") {
+			headings = append(headings, line)
+		}
+	}
+	return headings
+}
+
+func mustHaveHeadings(t *testing.T, doc string, wants ...string) {
+	t.Helper()
+	have := headingsOutsideFences(doc)
+	for _, want := range wants {
+		if !slices.Contains(have, want) {
+			t.Errorf("heading %q is missing or inside a code fence; headings outside fences: %q", want, have)
+		}
+	}
+}
+
+// blockStarts are untrusted paragraphs that would start a fence, a list, a
+// quote or an indented code block if written as they are.
+var blockStarts = map[string]string{
+	"~~~ fence":         `\~\~\~ fence`,
+	"- list":            `\- list`,
+	"+ list":            `\+ list`,
+	"> quote":           `&gt; quote`,
+	"1. ordered":        `1\. ordered`,
+	"12) ordered":       `12\) ordered`,
+	"    indented code": "indented code",
+	"\tindented code":   "indented code",
+	"‮~~~ reversed":     `\~\~\~ reversed`,
+	"\x1b[2K~~~ escape": `\[2K\~\~\~ escape`,
+	"zero​width":        "zerowidth",
+	"2026 was fine":     "2026 was fine",
+}
+
+func TestAHostileDescriptionCannotStartABlock(t *testing.T) {
+	for description, want := range blockStarts {
+		t.Run(description, func(t *testing.T) {
+			run := sampleRun(t, sampleEvents)
+			for i := range run.Report.Findings {
+				run.Report.Findings[i].Description = description
+			}
+
+			doc := Markdown(run)
+
+			mustContain(t, doc, "\n\n"+want+"\n\n")
+			mustHaveHeadings(t, doc, "### 2. Reflected XSS", "## Dismissed results", "## Appendix", "### Budget")
+		})
+	}
+}
+
+func TestAHostileChainSummaryCannotStartABlock(t *testing.T) {
+	for summary, want := range blockStarts {
+		t.Run(summary, func(t *testing.T) {
+			run := quietRun(t)
+			run.Chains = hostileChains()
+			run.Chains[0].Summary = summary
+
+			doc := Markdown(run)
+
+			mustContain(t, doc, "### Chain 1: score 88 / 100\n\n"+want+"\n\n")
+			mustHaveHeadings(t, doc, "### Chain 2: score 41 / 100", "## Findings that need attention", "## Appendix")
+		})
+	}
+}
+
+func TestHostileNotesCannotStartABlock(t *testing.T) {
+	for note, want := range blockStarts {
+		t.Run(note, func(t *testing.T) {
+			run := quietRun(t)
+			run.Report.Activity = record.Activity{Notes: []string{note, "after"}}
+
+			doc := Markdown(run)
+
+			mustContain(t, doc, "- "+want+"\n- after\n")
+			mustHaveHeadings(t, doc, "## Appendix", "### What else the run did")
+		})
+	}
+}
+
+func TestInlineTextDropsInvisibleCharactersAndEscapesTildes(t *testing.T) {
+	cases := map[string]string{
+		"~~strike~~":         `\~\~strike\~\~`,
+		"a‮b⁦c‍":             "abc",
+		"bell\a and \x00nul": "bell and nul",
+		"tab\there":          "tab here",
+		"line\r\nbreak":      "line  break",
+	}
+	for input, want := range cases {
+		if got := md(input); got != want {
+			t.Errorf("md(%q) = %q; want %q", input, got, want)
+		}
+	}
+}
+
+func TestClippingNeverSplitsACharacter(t *testing.T) {
+	for _, prefix := range []string{"", "a", "ab", "abc"} {
+		long := prefix + strings.Repeat("é€😀", maxEvidenceChars)
+
+		got := clip(long)
+
+		kept := strings.TrimSuffix(got, truncationNote)
+		if !utf8.ValidString(got) || len(kept) > maxEvidenceChars || !strings.HasPrefix(long, kept) || len(kept) < maxEvidenceChars-3 {
+			t.Errorf("prefix %q: clipped to %d valid=%v bytes", prefix, len(kept), utf8.ValidString(got))
+		}
+	}
 }

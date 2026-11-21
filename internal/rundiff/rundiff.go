@@ -71,10 +71,22 @@ func Compare(base, head record.Run) Diff {
 	return d
 }
 
-// HasNew reports whether head has anything base did not, which is what
-// should fail a continuous-testing gate.
+// HasNew reports whether head has anything base did not, or a finding that
+// became confirmed, which is what should fail a continuous-testing gate.
 func (d Diff) HasNew() bool {
-	return len(d.New) > 0
+	return len(d.New) > 0 || len(d.Escalated()) > 0
+}
+
+// Escalated returns the status changes to confirmed from anything else, in
+// the order of StatusChanged.
+func (d Diff) Escalated() []Change {
+	out := []Change{}
+	for _, c := range d.StatusChanged {
+		if c.After == finding.Confirmed && c.Before != finding.Confirmed {
+			out = append(out, c)
+		}
+	}
+	return out
 }
 
 func needsAttention(s finding.Status) bool {
