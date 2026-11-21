@@ -633,3 +633,21 @@ func TestRecordingSettings(t *testing.T) {
 		t.Fatalf("cfg.Recording = %+v, err = %v; want the recording accepted", cfg.Recording, err)
 	}
 }
+
+func TestInjectSettings(t *testing.T) {
+	inject := func(max int) func(m map[string]any) {
+		return func(m map[string]any) { m["inject"] = map[string]any{"max_requests": max} }
+	}
+	rejects(t, map[string]rejection{
+		"no limit":        {inject(0), "inject.max_requests"},
+		"limit too high":  {inject(20001), "inject.max_requests"},
+		"misspelt option": {func(m map[string]any) { m["inject"] = map[string]any{"requests": 5} }, "unknown field"},
+	})
+
+	m := probedMap()
+	inject(50)(m)
+	cfg, err := parseMap(t, m)
+	if err != nil || cfg.Inject == nil || !cfg.NeedsProbe() {
+		t.Fatalf("cfg.Inject = %+v, err = %v; want it accepted and the probe required", cfg.Inject, err)
+	}
+}

@@ -112,6 +112,7 @@ Unknown fields are rejected, so a misspelt setting is never silently ignored.
 | `ports` | Hosts and ports to try, and which ports are expected to be open. |
 | `crawl` | Page and depth limits for link-following discovery. |
 | `recording` | A browser recording (HAR file) whose in-scope pages are added to the scan: `{"path": "session.har", "max_targets": 200}`. For single-page applications and screens behind a login, which link-following cannot reach. Every address in the file is checked against the scope; cookies, credentials and body values in it are discarded; requests that change state are counted, not replayed. |
+| `inject` | Built-in active checks on every address with query parameters that the targets, the crawl and a recording provide: `{"max_requests": 500}`. Three flaws, each with a strict proof rule and only harmless payloads over GET: reflected input (the marker must come back in an HTML page with the character that escapes its context unencoded), SQL errors (a database error must appear with one quote, and not with two, and not in the normal response), and open redirects (the redirect must point at a canary host that cannot exist). Each finding is re-tested like any other. Needs `probe`. |
 | `recon` | Limits for discovering hosts under wildcard scope entries. |
 | `source` | A source tree and which analyses to run on it. |
 | `agent` | The autonomous explorer: step limit, goal, and what to do about risky requests. |

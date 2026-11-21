@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
@@ -28,7 +29,10 @@ const (
 	// defaultRecordingTargets is how many recorded pages are scanned when the
 	// configuration does not say.
 	defaultRecordingTargets = 200
-	maxLeads                = 40
+	// formPlaceholder fills a form field so the input checks have a value to
+	// replace.
+	formPlaceholder = "1"
+	maxLeads        = 40
 )
 
 func bytesReader(raw []byte) io.Reader { return bytes.NewReader(raw) }
@@ -39,7 +43,7 @@ func bytesReader(raw []byte) io.Reader { return bytes.NewReader(raw) }
 func (r *run) collect(ctx context.Context) ([]finding.Finding, error) {
 	var candidates []finding.Finding
 	stages := []func(context.Context) ([]finding.Finding, error){
-		r.discover, r.importRecording, r.crawlTargets, r.scanTargets, r.checkAccess, r.testAPI, r.testGraphQL, r.findOpenPorts,
+		r.discover, r.importRecording, r.crawlTargets, r.injectChecks, r.scanTargets, r.checkAccess, r.testAPI, r.testGraphQL, r.findOpenPorts,
 		r.analyseCode, r.findSecrets, r.checkDependencies,
 	}
 	for _, stage := range stages {
@@ -133,6 +137,11 @@ func (r *run) importRecording(context.Context) ([]finding.Finding, error) {
 			r.activity.Endpoints = append(r.activity.Endpoints, pageURL)
 		}
 	}
+	for _, request := range recording.Requests {
+		if request.Method == http.MethodGet && !request.StateChanging && len(request.QueryParams) > 0 {
+			r.paramURLs = append(r.paramURLs, request.URL)
+		}
+	}
 	r.noteRecording(recording, added)
 	return nil, nil
 }
@@ -154,6 +163,64 @@ func (r *run) noteRecording(recording har.Recording, added int) {
 	if unread := skipped.Malformed + skipped.UnsupportedScheme + skipped.OverLimit; unread > 0 {
 		r.note("%d recorded request(s) could not be used (malformed, not http, or over the limit).", unread)
 	}
+}
+
+// crawledParamURLs lists what the crawl saw that takes parameters: links
+// with a query string, and forms that submit with GET, each field filled
+// with a placeholder so the checks have a value to replace.
+func crawledParamURLs(result crawl.Result) []string {
+	var out []string
+	for _, page := range result.Pages {
+		for _, link := range append([]string{page.URL}, page.Links...) {
+			if strings.Contains(link, "?") {
+				out = append(out, link)
+			}
+		}
+		for _, form := range page.Forms {
+			if form.Method != http.MethodGet || len(form.Fields) == 0 || strings.Contains(form.Action, "?") {
+				continue
+			}
+			query := url.Values{}
+			for _, field := range form.Fields {
+				query.Set(field, formPlaceholder)
+			}
+			out = append(out, form.Action+"?"+query.Encode())
+		}
+	}
+	return out
+}
+
+// injectChecks runs the built-in active checks on every address with query
+// parameters that the targets, the recording and the crawl provided.
+func (r *run) injectChecks(ctx context.Context) ([]finding.Finding, error) {
+	if r.injector == nil {
+		return nil, nil
+	}
+	urls := append([]string{}, r.paramURLs...)
+	for _, target := range r.targets {
+		if strings.Contains(target, "?") {
+			urls = append(urls, target)
+		}
+	}
+	if len(urls) == 0 {
+		r.note("The input checks had nothing to test: no address with query parameters was found. Turn on crawling or add a browser recording.")
+		return nil, nil
+	}
+	result, err := r.injector.Run(ctx, urls)
+	if err != nil {
+		return nil, fmt.Errorf("input checks: %w", err)
+	}
+	r.note("The input checks tested %d parameter(s) with %d request(s).", result.Tested, result.Requests)
+	if result.Truncated {
+		r.note("The input checks stopped at the limit of %d requests with %d parameter(s) untested.", r.cfg.Inject.MaxRequests, result.Untested)
+	}
+	if result.Unanswered > 0 {
+		r.note("%d input-check request(s) were not answered, so those parameters are not judged.", result.Unanswered)
+	}
+	if len(result.Skipped) > 0 {
+		r.note("%d address(es) were left out of the input checks: out of scope for the scanning account, or likely to change state.", len(result.Skipped))
+	}
+	return result.Findings, nil
 }
 
 func (r *run) note(format string, args ...any) {
@@ -185,6 +252,7 @@ func (r *run) crawlTargets(ctx context.Context) ([]finding.Finding, error) {
 		return nil, fmt.Errorf("crawl: %w", err)
 	}
 	r.activity.PagesCrawled, r.activity.CrawlTruncated = len(result.Pages), result.Truncated
+	r.paramURLs = append(r.paramURLs, crawledParamURLs(result)...)
 	for _, page := range result.Pages {
 		if page.Error == "" && len(r.activity.Endpoints) < maxEndpointsKept {
 			r.activity.Endpoints = append(r.activity.Endpoints, page.URL)

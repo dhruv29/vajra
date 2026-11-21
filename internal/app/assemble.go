@@ -17,6 +17,7 @@ import (
 	"github.com/dhruv29/vajra/internal/config"
 	"github.com/dhruv29/vajra/internal/finding"
 	"github.com/dhruv29/vajra/internal/graphql"
+	"github.com/dhruv29/vajra/internal/inject"
 	"github.com/dhruv29/vajra/internal/llm"
 	"github.com/dhruv29/vajra/internal/nuclei"
 	"github.com/dhruv29/vajra/internal/openapi"
@@ -42,7 +43,11 @@ type run struct {
 	cfg    config.Config
 	deps   Deps
 	policy *scope.Policy
-	budget *budget.Budget
+	// injector runs the built-in active checks; nil when they are off.
+	injector *inject.Checker
+	// paramURLs are addresses with query parameters seen during discovery.
+	paramURLs []string
+	budget    *budget.Budget
 
 	// targets starts as the configured list and grows with discovered hosts.
 	targets  []string
@@ -326,6 +331,18 @@ func (r *run) addProbeUsers(router verify.SourceRouter) error {
 		if err := r.addPorts(); err != nil {
 			return err
 		}
+	}
+	if cfg.Inject != nil {
+		// The checks send the scanning account's session, so they are held to
+		// the hosts that account was issued for, as the crawl is.
+		var err error
+		r.injector, err = inject.New(r.fetcher, inject.Options{
+			Headers: r.scanHeaders, MaxRequests: cfg.Inject.MaxRequests, InScope: r.inAccountScope,
+		})
+		if err != nil {
+			return err
+		}
+		router[inject.Source] = r.injector
 	}
 	if cfg.Agent != nil {
 		// The explorer is created when it runs, because its briefing depends

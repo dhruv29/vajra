@@ -4,7 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"github.com/dhruv29/vajra/internal/crawl"
+	"github.com/dhruv29/vajra/internal/inject"
 	"net/http"
+	"net/url"
 	"os"
 	"slices"
 	"strings"
@@ -737,5 +740,109 @@ func TestAnOversizedRecordingIsRefusedBeforeItIsRead(t *testing.T) {
 
 	if err == nil || !strings.Contains(err.Error(), "export it without response bodies") {
 		t.Fatalf("err = %v; want the size refused with advice", err)
+	}
+}
+
+// echoSite has one page that links to a search page, and a search page that
+// writes its q parameter back without escaping it.
+func echoSite(req probe.Request) probe.Response {
+	u, err := url.Parse(req.URL)
+	if err != nil || u.Host != "app.test" {
+		return probe.Response{Status: http.StatusNotFound, Body: "not found"}
+	}
+	switch u.Path {
+	case "/", "":
+		return htmlPage(`<a href="/search?q=shoes">search</a> <a href="/about?ref=home">about</a>`)
+	case "/search":
+		return htmlPage("<p>Results for " + u.Query().Get("q") + "</p>")
+	case "/about":
+		return htmlPage("<p>About us</p>")
+	}
+	return probe.Response{Status: http.StatusNotFound, Body: "not found"}
+}
+
+func withInject(maxRequests int) func(m map[string]any) {
+	return func(m map[string]any) {
+		withCrawl(10)(m)
+		m["inject"] = map[string]any{"max_requests": maxRequests}
+	}
+}
+
+func TestInputChecksConfirmAReflectedParameterTheCrawlFound(t *testing.T) {
+	cfg, policy := labConfig(t, "none", withInject(100))
+	runner := &labRunner{respond: echoSite}
+
+	report, err := Scan(context.Background(), cfg, policy, labDeps(runner, "", nil))
+
+	if err != nil {
+		t.Fatal(err)
+	}
+	var reflected []finding.Finding
+	for _, f := range report.Findings {
+		if f.Source == inject.Source {
+			reflected = append(reflected, f)
+		}
+	}
+	if len(reflected) != 1 || !strings.Contains(reflected[0].Target, "/search?q=") {
+		t.Fatalf("input-check findings = %+v; want the search parameter reported and the safe page left alone", reflected)
+	}
+	// With no reviewer configured a finding stops at unconfirmed, but the
+	// re-test must have repeated the proof.
+	retested := false
+	for _, verdict := range reflected[0].Verdicts {
+		if verdict.Stage == "reproduce" && verdict.Outcome == finding.Pass {
+			retested = true
+		}
+	}
+	if !retested {
+		t.Fatalf("verdicts = %+v; want the finding re-tested successfully", reflected[0].Verdicts)
+	}
+	if notes := strings.Join(report.Activity.Notes, "\n"); !strings.Contains(notes, "The input checks tested 2 parameter(s)") {
+		t.Fatalf("notes = %q; want the number of parameters tested", notes)
+	}
+}
+
+func TestInputChecksSayWhenTheyHadNothingToTest(t *testing.T) {
+	cfg, policy := labConfig(t, "none", func(m map[string]any) { m["inject"] = map[string]any{"max_requests": 10} })
+
+	report, err := Scan(context.Background(), cfg, policy, labDeps(&labRunner{respond: echoSite}, "", nil))
+
+	if err != nil {
+		t.Fatal(err)
+	}
+	if notes := strings.Join(report.Activity.Notes, "\n"); !strings.Contains(notes, "had nothing to test") {
+		t.Fatalf("notes = %q; want the gap reported", notes)
+	}
+}
+
+func TestInputChecksReportStoppingAtTheRequestLimit(t *testing.T) {
+	cfg, policy := labConfig(t, "none", withInject(3))
+
+	report, err := Scan(context.Background(), cfg, policy, labDeps(&labRunner{respond: echoSite}, "", nil))
+
+	if err != nil {
+		t.Fatal(err)
+	}
+	if notes := strings.Join(report.Activity.Notes, "\n"); !strings.Contains(notes, "stopped at the limit of 3 requests") {
+		t.Fatalf("notes = %q; want the limit reported", notes)
+	}
+}
+
+func TestCrawledFormsThatSubmitWithGetBecomeAddressesToTest(t *testing.T) {
+	result := crawl.Result{Pages: []crawl.Page{{
+		URL:   "https://app.test/",
+		Links: []string{"https://app.test/a", "https://app.test/b?x=1"},
+		Forms: []crawl.Form{
+			{Action: "https://app.test/find", Method: "GET", Fields: []string{"q", "sort"}},
+			{Action: "https://app.test/buy", Method: "POST", Fields: []string{"item"}},
+			{Action: "https://app.test/empty", Method: "GET"},
+		},
+	}}}
+
+	got := crawledParamURLs(result)
+
+	want := []string{"https://app.test/b?x=1", "https://app.test/find?q=1&sort=1"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("addresses = %v; want %v (forms that post are never submitted)", got, want)
 	}
 }

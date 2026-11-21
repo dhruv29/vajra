@@ -38,6 +38,8 @@ const (
 	maxAgentSteps = 200
 	maxCrawlPages = 2000
 	maxCrawlDepth = 10
+	// maxInjectRequests bounds the active checks in one run.
+	maxInjectRequests = 20000
 	// MaxRecordingTargets is the most recorded pages one run may add.
 	MaxRecordingTargets = 2000
 	maxReconNames       = 5000
@@ -181,6 +183,14 @@ type Recording struct {
 	MaxTargets int `json:"max_targets"`
 }
 
+// Inject turns on the built-in active checks for reflected input, SQL
+// errors and open redirects. They run against the addresses with query
+// parameters that the targets, the crawl and a recording provide.
+type Inject struct {
+	// MaxRequests is the most requests the checks may send in one run.
+	MaxRequests int `json:"max_requests"`
+}
+
 // API configures testing against an OpenAPI description.
 type API struct {
 	// Spec is the path of an OpenAPI 3 JSON file.
@@ -250,6 +260,8 @@ type Config struct {
 	Probe    Probe                `json:"probe"`
 	Auth     *Auth                `json:"auth"`
 	Crawl    *Crawl               `json:"crawl"`
+	// Inject runs the built-in active checks on discovered parameters.
+	Inject *Inject `json:"inject"`
 	// Recording adds pages from a browser recording to the targets.
 	Recording *Recording `json:"recording"`
 	API       *API       `json:"api"`
@@ -324,7 +336,7 @@ func (c Config) IsLive() bool {
 
 // NeedsProbe reports whether the run uses Vajra's own HTTP client.
 func (c Config) NeedsProbe() bool {
-	return c.hasChecks() || c.API != nil || c.Crawl != nil || c.Agent != nil || c.GraphQL != nil || c.Ports != nil
+	return c.hasChecks() || c.API != nil || c.Crawl != nil || c.Agent != nil || c.GraphQL != nil || c.Ports != nil || c.Inject != nil
 }
 
 // needsScope reports whether the run names anything reachable.
@@ -478,6 +490,14 @@ func (c Config) validateDiscovery(policy *scope.Policy) error {
 	}
 	if err := c.validateRecording(); err != nil {
 		return err
+	}
+	if c.Inject != nil {
+		if c.Inject.MaxRequests < 1 || c.Inject.MaxRequests > maxInjectRequests {
+			return fmt.Errorf("config: inject.max_requests must be 1-%d", maxInjectRequests)
+		}
+		if len(c.Targets) == 0 {
+			return errors.New("config: inject needs targets")
+		}
 	}
 	if c.Recon == nil {
 		return nil
