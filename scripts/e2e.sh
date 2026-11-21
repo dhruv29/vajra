@@ -72,65 +72,9 @@ wait_for_target() {
   fail "the lab target did not start answering through the gate"
 }
 
-# retry runs a command up to three times. Building the scanner image downloads
-# its templates, which now and then fails for reasons that have nothing to do
-# with this repository.
-retry() {
-  local attempt
-  for attempt in 1 2 3; do
-    "$@" && return 0
-    echo "attempt $attempt failed: $*" >&2
-    sleep 5
-  done
-  return 1
-}
-
-# wait_for_target blocks until the lab web server answers through the gate.
-# A container that has just been started is not listening yet, and a scan
-# that begins too early would find nothing and blame the target.
-wait_for_target() {
-  local attempt
-  for attempt in $(seq 1 40); do
-    if docker run --rm --network "$TASK_NET" -e http_proxy=http://gate:3128 "$PROBE_IMAGE" \
-      wget -q -T 5 -O /dev/null "http://target/" 2>/dev/null; then
-      return 0
-    fi
-    sleep 0.5
-  done
-  fail "the lab target did not start answering through the gate"
-}
-
-# retry runs a command up to three times. Building the scanner image downloads
-# its templates, which now and then fails for reasons that have nothing to do
-# with this repository.
-retry() {
-  local attempt
-  for attempt in 1 2 3; do
-    "$@" && return 0
-    echo "attempt $attempt failed: $*" >&2
-    sleep 5
-  done
-  return 1
-}
-
-# wait_for_target blocks until the lab web server answers through the gate.
-# A container that has just been started is not listening yet, and a scan
-# that begins too early would find nothing and blame the target.
-wait_for_target() {
-  local attempt
-  for attempt in $(seq 1 40); do
-    if docker run --rm --network "$TASK_NET" -e http_proxy=http://gate:3128 "$PROBE_IMAGE" \
-      wget -q -T 5 -O /dev/null "http://target/" 2>/dev/null; then
-      return 0
-    fi
-    sleep 0.5
-  done
-  fail "the lab target did not start answering through the gate"
-}
-
 echo "== building images"
 docker build -q -t vajra:local . >/dev/null
-retry retry retry docker build -q -t vajra-nuclei:local -f deploy/nuclei.Dockerfile deploy >/dev/null
+retry docker build -q -t vajra-nuclei:local -f deploy/nuclei.Dockerfile deploy >/dev/null
 docker build -q -t vajra-semgrep:local -f deploy/semgrep.Dockerfile deploy >/dev/null
 go build -o "$WORK/vajra" ./cmd/vajra
 
@@ -194,10 +138,6 @@ for _ in $(seq 1 30); do
   sleep 0.5
 done
 grep -q "egress gate listening" <<<"$gate_log" || fail "the gate did not start: $gate_log"
-
-wait_for_target
-
-wait_for_target
 
 wait_for_target
 
@@ -341,8 +281,6 @@ NGINXEOF
 chmod -R a+rX "$WORK/app" "$WORK/nginx.conf"
 docker run -d --name "$TARGET" --network "$LAB_NET" --network-alias target \
   -v "$WORK/app:/usr/share/nginx/html:ro" -v "$WORK/nginx.conf:/etc/nginx/conf.d/default.conf:ro" nginx:alpine >/dev/null
-wait_for_target
-wait_for_target
 wait_for_target
 cat > "$WORK/openapi.json" <<'APIEOF'
 {

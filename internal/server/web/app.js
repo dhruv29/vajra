@@ -46,15 +46,20 @@ function svg(tag, attrs = {}, ...children) {
 
 // ---- Token and URL state -------------------------------------------------
 
-/** The token arrives once in the URL fragment and is then kept out of it. */
+/**
+ * The token arrives once in the URL fragment and is then kept out of it. It
+ * is stored for this origin (this address and port only), so the plain
+ * address keeps working in any tab of the same browser, not just the tab the
+ * link was opened in.
+ */
 function takeToken(params) {
   const fromURL = params.get("token");
   if (fromURL) {
-    sessionStorage.setItem(TOKEN_KEY, fromURL);
+    localStorage.setItem(TOKEN_KEY, fromURL);
     params.delete("token");
     history.replaceState(null, "", "#" + params.toString());
   }
-  return sessionStorage.getItem(TOKEN_KEY);
+  return localStorage.getItem(TOKEN_KEY);
 }
 
 function readState() {
@@ -610,7 +615,7 @@ async function render() {
     if (error.status === 401) {
       // The token is no longer accepted. Forget it and show nothing that
       // could be mistaken for an empty result.
-      sessionStorage.removeItem(TOKEN_KEY);
+      localStorage.removeItem(TOKEN_KEY);
       hideAll();
       notify(SIGNED_OUT);
       return;
@@ -619,7 +624,7 @@ async function render() {
   }
 }
 
-const SIGNED_OUT = "This tab is not signed in. Open the link that vajra serve printed, or start it with -open; the link carries the access token.";
+const SIGNED_OUT = "This browser is not signed in. Open the link that vajra serve printed, or start it with -open; the link carries the access token.";
 
 /** Hide every panel that shows run data. */
 function hideAll() {
