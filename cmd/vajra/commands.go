@@ -6,6 +6,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"github.com/dhruv29/vajra/internal/report"
 	"io"
 	"os"
 	"time"
@@ -350,4 +351,35 @@ func runStop(args []string, stdout, stderr io.Writer) error {
 	}
 	fmt.Fprintf(stdout, "created %s; a scan using this data directory stops its explorer after the current step\n", path)
 	return nil
+}
+
+// runTicket prints one finding as a Markdown issue, for pasting into a
+// tracker. The title goes on the first line, then a blank line, then the body.
+func runTicket(args []string, stdout, stderr io.Writer) error {
+	flags := flag.NewFlagSet("ticket", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	dataDir := flags.String("data", "", "data directory (required)")
+	runID := flags.String("run", "", "run ID (required)")
+	findingID := flags.String("finding", "", "finding ID, as shown in the report (required)")
+	outPath := flags.String("out", "", "write here instead of standard output")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if *dataDir == "" || *runID == "" || *findingID == "" {
+		return errors.New("-data, -run and -finding are required")
+	}
+	run, err := loadRun(*dataDir, *runID)
+	if err != nil {
+		return err
+	}
+	title, body, err := report.Ticket(run, *findingID)
+	if err != nil {
+		return err
+	}
+	text := []byte(title + "\n\n" + body)
+	if *outPath == "" {
+		_, err = stdout.Write(text)
+		return err
+	}
+	return writePrivate(*outPath, text)
 }

@@ -139,7 +139,7 @@ The gates and the verification pipeline. Nothing else is safe to build first.
 | 15 | Baseline comparison, fail only on new findings, example pipeline | done |
 | 16 | New advisories matched to a run's recorded dependencies | done for dependencies; service versions are not matched |
 | 17 | A second model must also hold serious findings | done within one provider |
-| 18 | Signed reports, webhook summaries | done; user accounts, roles and ticketing are not built |
+| 18 | Signed reports, webhook summaries, findings exported as tracker issues | done; user accounts, roles and direct ticketing integrations are not built |
 | 19 | Reproducible build, zero third-party modules, base images pinned by digest, SBOM, CI | done; images are not signed |
 
 ## Not yet proven

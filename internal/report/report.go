@@ -397,3 +397,27 @@ func orNone(s string) string {
 	}
 	return s
 }
+
+// Ticket renders one finding as a self-contained Markdown issue: what it is,
+// how it was verified, what it reaches and the evidence. It is meant to be
+// pasted into an issue tracker, so it carries everything a person needs to
+// act without opening the full report.
+func Ticket(run record.Run, findingID string) (title, body string, err error) {
+	for _, it := range append(newView(run).Attention, newView(run).Dismissed...) {
+		if it.Finding.ID != findingID {
+			continue
+		}
+		var b strings.Builder
+		writeFinding(&b, 0, it)
+		text := b.String()
+		// writeFinding starts with a numbered heading; a ticket has its own title.
+		if _, rest, found := strings.Cut(text, "\n"); found {
+			text = strings.TrimLeft(rest, "\n")
+		}
+		footer := fmt.Sprintf("\n---\nFrom Vajra run %s, generated %s. Finding ID `%s`.\n",
+			md(run.ID), run.Report.GeneratedAt.Format("2006-01-02 15:04 MST"), md(it.Finding.ID))
+		heading := fmt.Sprintf("[%s] %s", it.Finding.Severity, clip(strings.Join(strings.Fields(it.Finding.Title), " ")))
+		return heading, text + footer, nil
+	}
+	return "", "", fmt.Errorf("report: run %s has no finding %q", run.ID, findingID)
+}

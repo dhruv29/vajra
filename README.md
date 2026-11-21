@@ -277,6 +277,7 @@ not a measurement.
 | `vajra bench -data DIR -run ID -key FILE` | Score a run against an answer key |
 | `vajra exposure -data DIR -run ID` | New advisories for a run's recorded dependencies |
 | `vajra fix -config FILE -data DIR -run ID -finding ID` | Propose a patch for a code finding and re-check it |
+| `vajra ticket -data DIR -run ID -finding ID` | Write one finding as a Markdown issue for a tracker |
 | `vajra keygen`, `sign`, `verify-signature` | Sign reports and check signatures |
 | `vajra demo -data DIR` | Save a sample run to explore |
 
@@ -362,8 +363,8 @@ Two rounds of independent security review have been done, and their findings
 fixed; the fixes from the second round have not themselves been re-reviewed.
 
 Not built: a recording proxy and browser-driven crawling, user accounts and
-roles in the web interface, ticketing integrations, and signed container
-images.
+roles in the web interface, direct ticketing integrations (`vajra ticket`
+writes an issue for you to paste or post), and signed container images.
 
 ## Development
 

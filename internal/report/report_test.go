@@ -651,3 +651,27 @@ func TestClippingNeverSplitsACharacter(t *testing.T) {
 		}
 	}
 }
+
+func TestTicketIsASelfContainedIssueForOneFinding(t *testing.T) {
+	run := sampleRun(t, nil)
+
+	title, body, err := Ticket(run, "sqli")
+
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(title, "[high] SQL injection") || strings.ContainsAny(title, "\n\r") {
+		t.Fatalf("title = %q", title)
+	}
+	mustContain(t, body, "- **Status:** confirmed", "**Blast radius.**", "**Verification.**", "**Request.**",
+		"From Vajra run 20261121-195440-0a1b2c3d", "Finding ID `sqli`")
+	if strings.HasPrefix(body, "###") || strings.Contains(body, "Reflected XSS") {
+		t.Fatalf("the ticket has a stray heading or another finding:\n%s", body[:200])
+	}
+	if _, _, err := Ticket(run, "missing"); err == nil {
+		t.Fatal("a ticket was produced for a finding that does not exist")
+	}
+	if _, body, err := Ticket(run, "noise"); err != nil || !strings.Contains(body, "refuted") {
+		t.Fatalf("a dismissed finding should still be exportable: %v", err)
+	}
+}

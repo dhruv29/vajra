@@ -480,3 +480,27 @@ func TestStopCreatesTheStopFileAndCanBeRepeated(t *testing.T) {
 		t.Fatalf("runs: code = %d, stdout = %q", code, stdout)
 	}
 }
+
+func TestTicketWritesOneFindingAsAnIssue(t *testing.T) {
+	data := t.TempDir()
+	_, stdout, _ := invoke("demo", "-data", data)
+	id := strings.SplitN(strings.SplitN(stdout, "saved sample run ", 2)[1], ";", 2)[0]
+
+	code, out, stderr := invoke("ticket", "-data", data, "-run", id, "-finding", "demo-sqli")
+
+	if code != exitOK || !strings.HasPrefix(out, "[high] SQL injection in order lookup\n\n") || !strings.Contains(out, "**Verification.**") {
+		t.Fatalf("code = %d, stderr = %q, out = %.120q", code, stderr, out)
+	}
+	file := filepath.Join(t.TempDir(), "issue.md")
+	if code, _, _ := invoke("ticket", "-data", data, "-run", id, "-finding", "demo-sqli", "-out", file); code != exitOK {
+		t.Fatal("writing the ticket to a file failed")
+	}
+	if info, err := os.Stat(file); err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("ticket file: %v, %v", info, err)
+	}
+	for _, args := range [][]string{{"ticket"}, {"ticket", "-data", data, "-run", id, "-finding", "nope"}, {"ticket", "-data", data, "-run", "bad", "-finding", "x"}} {
+		if code, _, stderr := invoke(args...); code == exitOK || stderr == "" {
+			t.Errorf("%v: code = %d", args, code)
+		}
+	}
+}
