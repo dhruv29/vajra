@@ -630,3 +630,87 @@ func TestSecretsInSourceAreVerifiedAndNeverCopiedOut(t *testing.T) {
 		t.Fatal("a source tree that cannot be read returned a clean report")
 	}
 }
+
+const browserRecording = `{"log":{"entries":[
+ {"request":{"method":"GET","url":"https://app.test/dashboard?tab=1","headers":[{"name":"Cookie","value":"sid=RECORDEDSECRET"}]}},
+ {"request":{"method":"GET","url":"https://app.test/settings","headers":[]}},
+ {"request":{"method":"POST","url":"https://app.test/orders","headers":[],"postData":{"mimeType":"application/json","text":"{\"qty\":1}"}}},
+ {"request":{"method":"GET","url":"https://other.test/tracker","headers":[]}}
+]}}`
+
+func withRecording(maxTargets int) func(m map[string]any) {
+	return func(m map[string]any) {
+		m["recording"] = map[string]any{"path": "session.har", "max_targets": maxTargets}
+	}
+}
+
+func TestARecordingAddsItsInScopePagesToTheScan(t *testing.T) {
+	cfg, policy := labConfig(t, "none", withRecording(0))
+	deps := labDeps(&labRunner{}, "", nil)
+	deps.ReadFile = func(string) ([]byte, error) { return []byte(browserRecording), nil }
+
+	report, err := Scan(context.Background(), cfg, policy, deps)
+
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"https://app.test/dashboard?tab=1", "https://app.test/settings"} {
+		if !slices.Contains(report.Targets, want) || !slices.Contains(report.Activity.Endpoints, want) {
+			t.Errorf("%s is missing from the targets %v or endpoints %v", want, report.Targets, report.Activity.Endpoints)
+		}
+	}
+	for _, target := range report.Targets {
+		if strings.Contains(target, "other.test") || strings.Contains(target, "/orders") {
+			t.Errorf("%s became a target; out-of-scope and state-changing requests must not", target)
+		}
+	}
+	notes := strings.Join(report.Activity.Notes, "\n")
+	for _, want := range []string{"added 2 page(s)", "1 recorded request(s) change state", "1 recorded request(s) were outside the scope"} {
+		if !strings.Contains(notes, want) {
+			t.Errorf("notes = %q; want them to say %q", notes, want)
+		}
+	}
+	raw, err := json.Marshal(report)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), "RECORDEDSECRET") {
+		t.Fatal("a cookie from the recording reached the report")
+	}
+}
+
+func TestARecordingOverTheLimitSaysWhatWasLeftOut(t *testing.T) {
+	cfg, policy := labConfig(t, "none", withRecording(1))
+	deps := labDeps(&labRunner{}, "", nil)
+	deps.ReadFile = func(string) ([]byte, error) { return []byte(browserRecording), nil }
+
+	report, err := Scan(context.Background(), cfg, policy, deps)
+
+	if err != nil {
+		t.Fatal(err)
+	}
+	notes := strings.Join(report.Activity.Notes, "\n")
+	if !strings.Contains(notes, "added 1 page(s)") || !strings.Contains(notes, "more pages than the limit of 1") {
+		t.Fatalf("notes = %q; want one page added and the limit reported", notes)
+	}
+}
+
+func TestAnUnreadableRecordingFailsTheRun(t *testing.T) {
+	cases := map[string]func(string) ([]byte, error){
+		"missing file": func(string) ([]byte, error) { return nil, errors.New("no such file") },
+		"not a HAR":    func(string) ([]byte, error) { return []byte("<html>"), nil },
+	}
+	for name, read := range cases {
+		t.Run(name, func(t *testing.T) {
+			cfg, policy := labConfig(t, "none", withRecording(0))
+			deps := labDeps(&labRunner{}, "", nil)
+			deps.ReadFile = read
+
+			_, err := Scan(context.Background(), cfg, policy, deps)
+
+			if err == nil || !strings.Contains(err.Error(), "recording:") {
+				t.Fatalf("err = %v; want the recording named as the cause", err)
+			}
+		})
+	}
+}

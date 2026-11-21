@@ -14,6 +14,7 @@ import (
 	"github.com/dhruv29/vajra/internal/config"
 	"github.com/dhruv29/vajra/internal/crawl"
 	"github.com/dhruv29/vajra/internal/finding"
+	"github.com/dhruv29/vajra/internal/har"
 	"github.com/dhruv29/vajra/internal/nuclei"
 	"github.com/dhruv29/vajra/internal/osv"
 	"github.com/dhruv29/vajra/internal/recon"
@@ -24,7 +25,10 @@ import (
 
 const (
 	maxEndpointsKept = 300
-	maxLeads         = 40
+	// defaultRecordingTargets is how many recorded pages are scanned when the
+	// configuration does not say.
+	defaultRecordingTargets = 200
+	maxLeads                = 40
 )
 
 func bytesReader(raw []byte) io.Reader { return bytes.NewReader(raw) }
@@ -35,7 +39,7 @@ func bytesReader(raw []byte) io.Reader { return bytes.NewReader(raw) }
 func (r *run) collect(ctx context.Context) ([]finding.Finding, error) {
 	var candidates []finding.Finding
 	stages := []func(context.Context) ([]finding.Finding, error){
-		r.discover, r.crawlTargets, r.scanTargets, r.checkAccess, r.testAPI, r.testGraphQL, r.findOpenPorts,
+		r.discover, r.importRecording, r.crawlTargets, r.scanTargets, r.checkAccess, r.testAPI, r.testGraphQL, r.findOpenPorts,
 		r.analyseCode, r.findSecrets, r.checkDependencies,
 	}
 	for _, stage := range stages {
@@ -82,6 +86,69 @@ func (r *run) discover(ctx context.Context) ([]finding.Finding, error) {
 		}
 	}
 	return nil, nil
+}
+
+// importRecording adds the in-scope pages of a browser recording to the
+// targets. The recording is treated as untrusted input: every address in it
+// is checked against the scope, and none of its cookies, credentials or body
+// values are kept.
+func (r *run) importRecording(context.Context) ([]finding.Finding, error) {
+	if r.cfg.Recording == nil {
+		return nil, nil
+	}
+	raw, err := r.deps.ReadFile(r.cfg.Recording.Path)
+	if err != nil {
+		return nil, fmt.Errorf("recording: %w", err)
+	}
+	recording, err := har.Parse(bytes.NewReader(raw), r.policy, har.Options{})
+	if err != nil {
+		return nil, fmt.Errorf("recording: %w", err)
+	}
+	limit := r.cfg.Recording.MaxTargets
+	if limit == 0 {
+		limit = defaultRecordingTargets
+	}
+	known := map[string]bool{}
+	for _, target := range r.targets {
+		known[target] = true
+	}
+	added := 0
+	for _, pageURL := range recording.URLs {
+		if known[pageURL] {
+			continue
+		}
+		if added == limit {
+			r.note("The recording holds more pages than the limit of %d, so the rest were not scanned.", limit)
+			break
+		}
+		known[pageURL] = true
+		r.targets = append(r.targets, pageURL)
+		added++
+		if len(r.activity.Endpoints) < maxEndpointsKept {
+			r.activity.Endpoints = append(r.activity.Endpoints, pageURL)
+		}
+	}
+	r.noteRecording(recording, added)
+	return nil, nil
+}
+
+// noteRecording says what the recording contributed and what was left out, so
+// a recording that added nothing is not mistaken for one that was scanned.
+func (r *run) noteRecording(recording har.Recording, added int) {
+	changing := 0
+	for _, request := range recording.Requests {
+		if request.StateChanging {
+			changing++
+		}
+	}
+	r.note("The browser recording added %d page(s) to the scan. %d recorded request(s) change state and were not replayed.", added, changing)
+	skipped := recording.Skipped
+	if skipped.OutOfScope > 0 {
+		r.note("%d recorded request(s) were outside the scope and were dropped.", skipped.OutOfScope)
+	}
+	if unread := skipped.Malformed + skipped.UnsupportedScheme + skipped.OverLimit; unread > 0 {
+		r.note("%d recorded request(s) could not be used (malformed, not http, or over the limit).", unread)
+	}
 }
 
 func (r *run) note(format string, args ...any) {

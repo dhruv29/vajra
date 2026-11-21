@@ -23,7 +23,7 @@ issues with evidence, ranked by what an attacker could reach from each one.
 | API | Operations an OpenAPI description marks as protected are requested without credentials |
 | GraphQL | Whether anyone can read the schema, and whether queries are answered without credentials |
 | Ports | Services listening on ports you did not expect, tried through the gate |
-| Discovery | Sub-domains under wildcard scope entries; link-following crawl of the targets |
+| Discovery | Sub-domains under wildcard scope entries; link-following crawl of the targets; pages imported from a browser recording |
 | Code | Semgrep with no network over a read-only copy of the source |
 | Secrets | Built-in search for hard-coded credentials; values are masked everywhere |
 | Dependencies | Pinned packages checked against the OSV advisory database (opt-in) |
@@ -111,6 +111,7 @@ Unknown fields are rejected, so a misspelt setting is never silently ignored.
 | `graphql` | A GraphQL endpoint to check. |
 | `ports` | Hosts and ports to try, and which ports are expected to be open. |
 | `crawl` | Page and depth limits for link-following discovery. |
+| `recording` | A browser recording (HAR file) whose in-scope pages are added to the scan: `{"path": "session.har", "max_targets": 200}`. For single-page applications and screens behind a login, which link-following cannot reach. Every address in the file is checked against the scope; cookies, credentials and body values in it are discarded; requests that change state are counted, not replayed. |
 | `recon` | Limits for discovering hosts under wildcard scope entries. |
 | `source` | A source tree and which analyses to run on it. |
 | `agent` | The autonomous explorer: step limit, goal, and what to do about risky requests. |
@@ -385,9 +386,12 @@ Covered by unit tests only, not yet run against a real system:
 Two rounds of independent security review have been done, and their findings
 fixed; the fixes from the second round have not themselves been re-reviewed.
 
-Not built: a recording proxy and browser-driven crawling, user accounts and
-roles in the web interface, and signed container images. Ticket filing to
-GitHub and Jira is tested only against stand-ins for their APIs.
+Not built: browser-driven crawling (a recording made in your own browser can
+be imported instead), business-logic checks, and user accounts and roles in
+the web interface. Ticket filing to GitHub and Jira is tested only against
+stand-ins for their APIs. The release workflow, which publishes checksummed
+binaries and a signed container image when a version tag is pushed, has not
+run yet.
 
 ## Development
 

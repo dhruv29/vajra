@@ -38,7 +38,9 @@ const (
 	maxAgentSteps = 200
 	maxCrawlPages = 2000
 	maxCrawlDepth = 10
-	maxReconNames = 5000
+	// MaxRecordingTargets is the most recorded pages one run may add.
+	MaxRecordingTargets = 2000
+	maxReconNames       = 5000
 
 	defaultReproduceAttempts = 2
 	maxReproduceAttempts     = 5
@@ -168,6 +170,17 @@ type Crawl struct {
 	MaxDepth int `json:"max_depth"`
 }
 
+// Recording imports a browser recording (a HAR file) so that pages a crawler
+// cannot reach by following links, such as a single-page application or the
+// screens behind a login flow, are scanned too.
+type Recording struct {
+	// Path is the HAR file, as exported from the browser's developer tools.
+	Path string `json:"path"`
+	// MaxTargets caps how many recorded pages are added to the scan. Zero
+	// means the default.
+	MaxTargets int `json:"max_targets"`
+}
+
 // API configures testing against an OpenAPI description.
 type API struct {
 	// Spec is the path of an OpenAPI 3 JSON file.
@@ -237,12 +250,14 @@ type Config struct {
 	Probe    Probe                `json:"probe"`
 	Auth     *Auth                `json:"auth"`
 	Crawl    *Crawl               `json:"crawl"`
-	API      *API                 `json:"api"`
-	Agent    *Agent               `json:"agent"`
-	Recon    *Recon               `json:"recon"`
-	Notify   *Notify              `json:"notify"`
-	GraphQL  *GraphQL             `json:"graphql"`
-	Ports    *Ports               `json:"ports"`
+	// Recording adds pages from a browser recording to the targets.
+	Recording *Recording `json:"recording"`
+	API       *API       `json:"api"`
+	Agent     *Agent     `json:"agent"`
+	Recon     *Recon     `json:"recon"`
+	Notify    *Notify    `json:"notify"`
+	GraphQL   *GraphQL   `json:"graphql"`
+	Ports     *Ports     `json:"ports"`
 }
 
 // Load reads and validates the configuration at path.
@@ -438,9 +453,31 @@ func (c Config) validateAuth(policy *scope.Policy) error {
 	return nil
 }
 
+// validateRecording requires targets alongside a recording: the targets are
+// what the operator vouched for and what selects the scanner settings, and
+// the recording only adds pages under the same scope.
+func (c Config) validateRecording() error {
+	if c.Recording == nil {
+		return nil
+	}
+	if strings.TrimSpace(c.Recording.Path) == "" {
+		return errors.New("config: recording.path must name the HAR file")
+	}
+	if c.Recording.MaxTargets < 0 || c.Recording.MaxTargets > MaxRecordingTargets {
+		return fmt.Errorf("config: recording.max_targets must be 0-%d", MaxRecordingTargets)
+	}
+	if len(c.Targets) == 0 {
+		return errors.New("config: a recording needs targets")
+	}
+	return nil
+}
+
 func (c Config) validateDiscovery(policy *scope.Policy) error {
 	if c.Crawl != nil && (c.Crawl.MaxPages < 1 || c.Crawl.MaxPages > maxCrawlPages || c.Crawl.MaxDepth < 0 || c.Crawl.MaxDepth > maxCrawlDepth) {
 		return fmt.Errorf("config: crawl.max_pages must be 1-%d and crawl.max_depth 0-%d", maxCrawlPages, maxCrawlDepth)
+	}
+	if err := c.validateRecording(); err != nil {
+		return err
 	}
 	if c.Recon == nil {
 		return nil

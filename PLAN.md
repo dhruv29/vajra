@@ -118,7 +118,7 @@ The gates and the verification pipeline. Nothing else is safe to build first.
 | 4b | Built-in secret search with masked values; dependency advisories from OSV (opt-in) | done |
 | 5 | Code and live findings corroborate each other; code findings are given to the explorer as leads to demonstrate live | done |
 | 6 | Test accounts, scanning as an account, access rules checked across every account | done |
-| 7 | Link-following crawler behind the gate | done; a recording proxy and browser-driven crawling are not built |
+| 7 | Link-following crawler behind the gate | done, with import of browser recordings; browser-driven crawling is not built |
 | 8 | OpenAPI import; protected operations requested without credentials; GraphQL schema and authentication checks | done; business-logic checks are not built |
 
 ### Phase 3: autonomy under gates
@@ -139,8 +139,8 @@ The gates and the verification pipeline. Nothing else is safe to build first.
 | 15 | Baseline comparison, fail only on new findings, example pipeline | done |
 | 16 | New advisories matched to a run's recorded dependencies | done for dependencies; service versions are not matched |
 | 17 | A second model must also hold serious findings | done within one provider |
-| 18 | Signed reports, webhook summaries, findings exported as tracker issues | done; user accounts, roles and direct ticketing integrations are not built |
-| 19 | Reproducible build, zero third-party modules, base images pinned by digest, SBOM, CI | done; images are not signed |
+| 18 | Signed reports, webhook summaries, findings exported as tracker issues | done, with filing to GitHub and Jira (tested against stand-ins); user accounts and roles are not built |
+| 19 | Reproducible build, zero third-party modules, base images pinned by digest, SBOM, CI | done; a release workflow signs the image, not yet run |
 
 ## Not yet proven
 

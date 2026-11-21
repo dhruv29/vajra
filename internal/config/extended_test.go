@@ -613,3 +613,23 @@ func TestGraphQLAndPortsSections(t *testing.T) {
 		}
 	}
 }
+
+func TestRecordingSettings(t *testing.T) {
+	recording := func(path string, max int) func(m map[string]any) {
+		return func(m map[string]any) { m["recording"] = map[string]any{"path": path, "max_targets": max} }
+	}
+	rejects(t, map[string]rejection{
+		"no path":         {recording(" ", 0), "recording.path"},
+		"negative limit":  {recording("a.har", -1), "recording.max_targets"},
+		"limit too high":  {recording("a.har", MaxRecordingTargets+1), "recording.max_targets"},
+		"without targets": {func(m map[string]any) { recording("a.har", 0)(m); m["targets"] = []string{} }, "targets"},
+		"misspelt option": {func(m map[string]any) { m["recording"] = map[string]any{"file": "a.har"} }, "unknown field"},
+	})
+
+	m := probedMap()
+	recording("a.har", 50)(m)
+	cfg, err := parseMap(t, m)
+	if err != nil || cfg.Recording == nil || cfg.Recording.MaxTargets != 50 {
+		t.Fatalf("cfg.Recording = %+v, err = %v; want the recording accepted", cfg.Recording, err)
+	}
+}
