@@ -1,0 +1,72 @@
+name: release
+
+# Runs when a version tag is pushed. It publishes binaries with checksums and
+# a bill of materials, and a container image signed with the workflow's own
+# identity, so a user can check that what they run was built here from this
+# source.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+env:
+  IMAGE: ghcr.io/${{ github.repository }}
+
+jobs:
+  binaries:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # create the release
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: false # there is no go.sum: the module has no dependencies
+      - name: Test before publishing anything
+        run: make check
+      - name: Build for each platform
+        run: |
+          mkdir dist
+          for target in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64; do
+            os="${target%/*}"; arch="${target#*/}"
+            GOOS="$os" GOARCH="$arch" make build BINARY="dist/vajra-$os-$arch"
+          done
+      - name: Bill of materials and checksums
+        run: |
+          ./scripts/sbom.sh dist/vajra-linux-amd64 > dist/sbom.json
+          cd dist && sha256sum vajra-* sbom.json > SHA256SUMS
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: gh release create "$TAG" dist/* --title "$TAG" --generate-notes --verify-tag
+
+  image:
+    runs-on: ubuntu-latest
+    needs: binaries
+    permissions:
+      contents: read
+      packages: write # push the image
+      id-token: write # sign it with the workflow's identity, no stored key
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      - name: Build and push
+        id: push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ env.IMAGE }}:${{ github.ref_name }}
+      - uses: sigstore/cosign-installer@v3
+      - name: Sign the image by digest
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: cosign sign --yes "${IMAGE}@${DIGEST}"
