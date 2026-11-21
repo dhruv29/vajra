@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"strings"
@@ -17,8 +18,10 @@ import (
 
 	"github.com/dhruv29/vajra/internal/app"
 	"github.com/dhruv29/vajra/internal/config"
+	"github.com/dhruv29/vajra/internal/demo"
 	"github.com/dhruv29/vajra/internal/finding"
 	"github.com/dhruv29/vajra/internal/sandbox"
+	"github.com/dhruv29/vajra/internal/server"
 	"github.com/dhruv29/vajra/internal/store"
 )
 
@@ -30,6 +33,9 @@ const (
 
 	reportFileMode = 0o600
 	auditFileMode  = 0o600
+
+	serveReadHeaderTimeout = 15 * time.Second
+	serveShutdownTimeout   = 2 * time.Second // short: a browser may hold idle connections open
 )
 
 const usage = `vajra: security testing that proves its findings
@@ -40,12 +46,16 @@ Usage:
   vajra gate   -config run.json [-listen :3128] [-audit audit.jsonl]
   vajra runs   -data DIR
   vajra report -data DIR -run ID [-format html|md|json] [-out FILE]
+  vajra serve  -data DIR [-listen 127.0.0.1:8700]
+  vajra demo   -data DIR
 
   scan    run the scanner against the configured targets, then verify each result
   verify  verify scanner output saved earlier
   gate    run the egress proxy that enforces the scope for task containers
   runs    list the runs saved in a data directory
   report  render a saved run, with the blast radius of each finding
+  serve   open the web interface over saved runs, on this machine only
+  demo    save a sample run, to explore the reports and the interface
 
 With -data, scan and verify also save the run so that it can be reported on.
 -gate-audit adds the gate's audit log, which shows what the run touched.
@@ -73,6 +83,10 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		err = runList(args[1:], stdout, stderr)
 	case "report":
 		err = runRender(args[1:], stdout, stderr)
+	case "serve":
+		err = runServe(ctx, args[1:], stderr)
+	case "demo":
+		err = runDemo(args[1:], stdout, stderr)
 	case "help", "-h", "--help":
 		fmt.Fprint(stdout, usage)
 	default:
@@ -279,4 +293,92 @@ func runRender(args []string, stdout, stderr io.Writer) error {
 		return err
 	}
 	return os.WriteFile(*outPath, rendered, reportFileMode)
+}
+
+func runServe(ctx context.Context, args []string, stderr io.Writer) error {
+	flags := flag.NewFlagSet("serve", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	dataDir := flags.String("data", "", "data directory (required)")
+	listen := flags.String("listen", "127.0.0.1:8700", "loopback address to listen on")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if *dataDir == "" {
+		return errors.New("-data is required")
+	}
+	if _, err := server.LoopbackAddr(*listen); err != nil {
+		return err
+	}
+	st, err := store.Open(*dataDir)
+	if err != nil {
+		return err
+	}
+	token, err := server.NewToken()
+	if err != nil {
+		return err
+	}
+	listener, err := net.Listen("tcp", *listen)
+	if err != nil {
+		return err
+	}
+	// Derived from the bound address, so "-listen 127.0.0.1:0" works.
+	hosts, err := server.LoopbackAddr(listener.Addr().String())
+	if err != nil {
+		listener.Close()
+		return err
+	}
+	handler, err := server.New(st, token, hosts)
+	if err != nil {
+		listener.Close()
+		return err
+	}
+	fmt.Fprintf(stderr, "vajra: open http://%s/#token=%s\n", listener.Addr(), token)
+	return serveUntilDone(ctx, listener, handler)
+}
+
+func serveUntilDone(ctx context.Context, listener net.Listener, handler http.Handler) error {
+	srv := &http.Server{Handler: handler, ReadHeaderTimeout: serveReadHeaderTimeout}
+	stopped := make(chan error, 1)
+	go func() { stopped <- srv.Serve(listener) }()
+	select {
+	case err := <-stopped:
+		return err
+	case <-ctx.Done():
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), serveShutdownTimeout)
+		defer cancel()
+		if err := srv.Shutdown(shutdownCtx); err != nil {
+			return srv.Close()
+		}
+		return nil
+	}
+}
+
+func runDemo(args []string, stdout, stderr io.Writer) error {
+	flags := flag.NewFlagSet("demo", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	dataDir := flags.String("data", "", "data directory (required)")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if *dataDir == "" {
+		return errors.New("-data is required")
+	}
+	st, err := store.Open(*dataDir)
+	if err != nil {
+		return err
+	}
+	now := time.Now()
+	id, err := store.NewID(now)
+	if err != nil {
+		return err
+	}
+	run, err := demo.Run(id, now)
+	if err != nil {
+		return err
+	}
+	if err := st.Save(run); err != nil {
+		return err
+	}
+	fmt.Fprintf(stdout, "saved sample run %s; view it with: vajra serve -data %s\n", id, *dataDir)
+	return nil
 }

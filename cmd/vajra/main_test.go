@@ -3,9 +3,11 @@ package main
 import (
 	"bytes"
 	"context"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -199,5 +201,104 @@ func TestReportAndRunsUsageErrors(t *testing.T) {
 		if code, _, stderr := invoke(args...); code == exitOK || stderr == "" {
 			t.Errorf("%s: code = %d, stderr = %q", name, code, stderr)
 		}
+	}
+}
+
+// lockedBuffer lets the test read what a running command has written so far.
+type lockedBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *lockedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *lockedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+func TestServeOpensTheInterfaceOnLoopbackWithAToken(t *testing.T) {
+	data := t.TempDir()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	stderr := &lockedBuffer{}
+	done := make(chan int, 1)
+	go func() {
+		done <- run(ctx, []string{"serve", "-data", data, "-listen", "127.0.0.1:0"}, &bytes.Buffer{}, stderr)
+	}()
+
+	var link string
+	for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); time.Sleep(20 * time.Millisecond) {
+		if _, after, found := strings.Cut(stderr.String(), "vajra: open "); found && strings.Contains(after, "\n") {
+			link = strings.TrimSpace(strings.SplitN(after, "\n", 2)[0])
+			break
+		}
+	}
+	base, token, found := strings.Cut(link, "/#token=")
+	if !found || len(token) != 64 {
+		t.Fatalf("link = %q", link)
+	}
+
+	page, err := http.Get(base + "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	page.Body.Close()
+	denied, _ := http.Get(base + "/api/runs")
+	denied.Body.Close()
+	req, _ := http.NewRequest(http.MethodGet, base+"/api/runs", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	allowed, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	allowed.Body.Close()
+
+	if page.StatusCode != http.StatusOK || denied.StatusCode != http.StatusUnauthorized || allowed.StatusCode != http.StatusOK {
+		t.Fatalf("page = %d, without token = %d, with token = %d", page.StatusCode, denied.StatusCode, allowed.StatusCode)
+	}
+	cancel()
+	select {
+	case code := <-done:
+		if code != exitOK {
+			t.Fatalf("code = %d, stderr = %q", code, stderr.String())
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("serve did not stop after cancellation")
+	}
+}
+
+func TestServeRefusesNonLoopbackAndMissingData(t *testing.T) {
+	data := t.TempDir()
+	for name, args := range map[string][]string{
+		"all interfaces": {"serve", "-data", data, "-listen", "0.0.0.0:8700"},
+		"lan address":    {"serve", "-data", data, "-listen", "192.168.1.5:8700"},
+		"no data":        {"serve"},
+	} {
+		if code, _, stderr := invoke(args...); code != exitError || stderr == "" {
+			t.Errorf("%s: code = %d, stderr = %q", name, code, stderr)
+		}
+	}
+}
+
+func TestDemoSavesASampleRunThatCanBeReported(t *testing.T) {
+	data := t.TempDir()
+
+	code, stdout, stderr := invoke("demo", "-data", data)
+
+	if code != exitOK || !strings.Contains(stdout, "saved sample run ") {
+		t.Fatalf("code = %d, stdout = %q, stderr = %q", code, stdout, stderr)
+	}
+	id := strings.SplitN(strings.SplitN(stdout, "saved sample run ", 2)[1], ";", 2)[0]
+	if code, md, _ := invoke("report", "-data", data, "-run", id, "-format", "md"); code != exitOK || !strings.Contains(md, "| confirmed | 3 |") {
+		t.Fatalf("report: code = %d", code)
+	}
+	if code, _, _ := invoke("demo"); code != exitError {
+		t.Fatalf("demo without -data: code = %d", code)
 	}
 }

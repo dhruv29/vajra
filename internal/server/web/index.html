@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Vajra</title>
+  <link rel="stylesheet" href="app.css">
+  <script type="module" src="app.js"></script>
+</head>
+<body>
+  <a class="skip" href="#findings-heading">Skip to findings</a>
+  <header class="masthead">
+    <div class="brand">
+      <span class="mark" aria-hidden="true"></span>
+      <strong>Vajra</strong>
+      <span class="tagline">Findings that were proven, and what each one reaches</span>
+    </div>
+    <div class="exports" id="exports" hidden>
+      <span class="eyebrow">Export report</span>
+      <button type="button" data-format="html">HTML</button>
+      <button type="button" data-format="md">Markdown</button>
+      <button type="button" data-format="json">JSON</button>
+    </div>
+  </header>
+
+  <p id="notice" class="notice" role="status" hidden></p>
+
+  <div class="layout">
+    <nav class="rail" aria-labelledby="runs-heading">
+      <h2 id="runs-heading" class="eyebrow">Saved runs</h2>
+      <ol id="runs" class="runs"></ol>
+    </nav>
+
+    <main>
+      <section id="overview" class="overview" aria-labelledby="overview-heading" hidden>
+        <p class="eyebrow" id="overview-eyebrow"></p>
+        <h1 id="overview-heading"></h1>
+        <dl id="overview-meta" class="meta"></dl>
+        <div id="counts" class="counts" role="group" aria-label="Filter findings by status"></div>
+      </section>
+
+      <div class="workbench" id="workbench" hidden>
+        <section class="list" aria-labelledby="findings-heading">
+          <h2 id="findings-heading">Findings</h2>
+          <ol id="findings" class="findings"></ol>
+        </section>
+
+        <section class="detail" id="detail" aria-live="polite" aria-labelledby="detail-heading">
+          <h2 id="detail-heading" class="visually-hidden">Finding detail</h2>
+          <div id="detail-body"></div>
+        </section>
+      </div>
+
+      <section id="reach" class="reach" aria-labelledby="reach-heading" hidden>
+        <h2 id="reach-heading">What this run touched</h2>
+        <div id="reach-body"></div>
+      </section>
+    </main>
+  </div>
+</body>
+</html>

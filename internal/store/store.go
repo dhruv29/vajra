@@ -29,6 +29,9 @@ const (
 // ErrNotFound means no run has the requested ID.
 var ErrNotFound = errors.New("store: run not found")
 
+// ErrBadID means the ID is not one this store could have issued.
+var ErrBadID = errors.New("store: run id is malformed")
+
 var idPattern = regexp.MustCompile(`^[0-9]{8}-[0-9]{6}-[0-9a-f]{8}$`)
 
 // Store reads and writes runs under a data directory.
@@ -59,7 +62,7 @@ func NewID(now time.Time) (string, error) {
 
 func (s *Store) path(id string) (string, error) {
 	if !idPattern.MatchString(id) {
-		return "", fmt.Errorf("store: run id %q is malformed", id)
+		return "", fmt.Errorf("%w: %q", ErrBadID, id)
 	}
 	return filepath.Join(s.dir, id+".json"), nil
 }

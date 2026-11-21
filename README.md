@@ -9,7 +9,7 @@ list of true issues with evidence, not thousands of alerts.
 
 > Status: early. The gated core, verification pipeline, blast-radius engine
 > and reports work and are tested, including an end-to-end run against a lab
-> target. The web UI is next; see [PLAN.md](PLAN.md).
+> target. Code analysis (SAST) is next; see [PLAN.md](PLAN.md).
 
 ## How it works
 
@@ -78,6 +78,8 @@ start.
 | `vajra gate -config FILE` | Run the egress gate (normally started by Docker Compose) |
 | `vajra runs -data DIR` | List saved runs |
 | `vajra report -data DIR -run ID` | Render a saved run as `html`, `md` or `json` |
+| `vajra serve -data DIR` | Open the web interface over saved runs |
+| `vajra demo -data DIR` | Save a sample run to explore |
 
 Flags for `scan` and `verify`:
 
@@ -158,7 +160,23 @@ go vet ./...
 go test ./... -race -cover
 ```
 
+## Web interface
+
+```bash
+./vajra demo -data data          # optional: save a sample run to look at
+./vajra serve -data data
+```
+
+`serve` prints a link carrying a one-time access token. The interface is
+read-only, listens on loopback only, and loads nothing from the network. It
+shows saved runs, findings ordered by blast radius, a graph of what each
+finding reaches, what the run touched, and report export.
+
 ## Authorised use only
 
 Test only systems you own or have written permission to test. Vajra records the
 authorisation statement and operator in every report.
+
+## Licence
+
+GNU Affero General Public License v3.0. See [LICENSE](LICENSE).

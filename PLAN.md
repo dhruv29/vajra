@@ -108,7 +108,7 @@ The gates and the verification pipeline. Nothing else is safe to build first.
 |---|---|---|
 | 1 | Scope policy, egress proxy, sandbox runner, budgets, finding model, verification pipeline, nuclei adapter, LLM refuter, CLI | done |
 | 2 | Run store, asset graph, blast-radius engine, Markdown and HTML reports, run reach from the gate audit log | done |
-| 3 | HTTP API and web UI: runs, findings triage, blast-radius graph, run reach, report export | next |
+| 3 | Read-only HTTP API and web UI: runs, findings by blast radius, reach graph, run reach, report export, sample run | done |
 
 ### Phase 2: full coverage of an application
 
@@ -149,10 +149,10 @@ The gates and the verification pipeline. Nothing else is safe to build first.
   build step and no third-party scripts, so a strict content-security policy
   is possible.
 - JSON configuration (no YAML dependency).
+- Licensed under AGPL-3.0.
 
 ## Open questions
 
-- Licence for this repository.
 - Raw TCP tools (port scanning) need a SOCKS or transparent gate; the first
   proxy speaks HTTP and CONNECT only.
 - Which model backs the refuter by default, and whether a second, different
