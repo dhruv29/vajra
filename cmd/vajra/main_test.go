@@ -43,6 +43,8 @@ func TestMain(m *testing.M) {
 			// service fails instead of reaching the real one.
 			ModelBaseURL: unreachableURL,
 			OSVBaseURL:   unreachableURL,
+			// Ticket filing likewise never reaches the real GitHub.
+			GitHubBaseURL: unreachableURL,
 		}
 	}
 	os.Exit(m.Run())

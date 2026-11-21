@@ -56,6 +56,9 @@ type Deps struct {
 	ModelBaseURL string
 	ModelClient  *http.Client
 	OSVBaseURL   string
+	// GitHubBaseURL overrides the GitHub API that "vajra ticket -file github"
+	// files issues with, in tests. Empty means api.github.com.
+	GitHubBaseURL string
 }
 
 // Report is the verified output of a run.

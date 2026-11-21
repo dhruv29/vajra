@@ -277,7 +277,7 @@ not a measurement.
 | `vajra bench -data DIR -run ID -key FILE` | Score a run against an answer key |
 | `vajra exposure -data DIR -run ID` | New advisories for a run's recorded dependencies |
 | `vajra fix -config FILE -data DIR -run ID -finding ID` | Propose a patch for a code finding and re-check it |
-| `vajra ticket -data DIR -run ID -finding ID` | Write one finding as a Markdown issue for a tracker |
+| `vajra ticket -data DIR -run ID -finding ID` | Write one finding as a Markdown issue, or file it in GitHub or Jira |
 | `vajra keygen`, `sign`, `verify-signature` | Sign reports and check signatures |
 | `vajra demo -data DIR` | Save a sample run to explore |
 
@@ -291,6 +291,29 @@ Flags for `scan` and `verify`:
   status 3 only when something new needs attention.
 - `-fail-on-confirmed` exits with status 3 when any finding is confirmed.
 - `-notify` posts a summary to the configured webhook.
+
+### Filing tickets
+
+Without `-file`, `vajra ticket` prints the issue for you to paste. With it,
+the issue is filed for you:
+
+```bash
+VAJRA_GITHUB_TOKEN=... ./vajra ticket -data data -run RUN_ID -finding ID -file github -repo acme/shop
+VAJRA_JIRA_EMAIL=you@example.com VAJRA_JIRA_TOKEN=... \
+  ./vajra ticket -data data -run RUN_ID -finding ID \
+  -file jira -jira-url https://example.atlassian.net -jira-project SEC [-jira-type Bug]
+```
+
+- Only `confirmed` findings are filed; `-force` files one with another status.
+- Filing is idempotent. The ticket carries the line `vajra-finding: ID`
+  (and, in Jira, the label `vajra-ID`); if a ticket with that marker already
+  exists, open or closed, it is reported and nothing new is filed. GitHub's
+  search index lags by a few seconds, so filing the same finding twice in
+  quick succession can still make two issues.
+- Credentials are read only from the environment, never from flags, and never
+  appear in errors. The API must be https (plain http only to a loopback
+  address), redirects are not followed, and replies are size-capped.
+- Jira descriptions hold the Markdown in a code block, unconverted.
 
 ## Continuous testing
 
@@ -363,8 +386,8 @@ Two rounds of independent security review have been done, and their findings
 fixed; the fixes from the second round have not themselves been re-reviewed.
 
 Not built: a recording proxy and browser-driven crawling, user accounts and
-roles in the web interface, direct ticketing integrations (`vajra ticket`
-writes an issue for you to paste or post), and signed container images.
+roles in the web interface, and signed container images. Ticket filing to
+GitHub and Jira is tested only against stand-ins for their APIs.
 
 ## Development
 
