@@ -27,7 +27,7 @@ type Runner interface {
 
 // execFunc runs the docker CLI with args and returns its exit code. A non-zero
 // exit is not an error; err is for failures to run the CLI at all.
-type execFunc func(ctx context.Context, args []string, stdout, stderr io.Writer) (int, error)
+type execFunc func(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer) (int, error)
 
 // Docker runs specs through the docker CLI.
 type Docker struct {
@@ -43,9 +43,9 @@ func NewDocker() *Docker {
 // The container gets none of it.
 var hostEnvForCLI = []string{"PATH", "HOME", "DOCKER_HOST", "DOCKER_CONFIG", "DOCKER_CONTEXT", "DOCKER_CERT_PATH", "DOCKER_TLS_VERIFY"}
 
-func dockerExec(ctx context.Context, args []string, stdout, stderr io.Writer) (int, error) {
+func dockerExec(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer) (int, error) {
 	cmd := exec.CommandContext(ctx, "docker", args...)
-	cmd.Stdout, cmd.Stderr = stdout, stderr
+	cmd.Stdin, cmd.Stdout, cmd.Stderr = stdin, stdout, stderr
 	cmd.Env = []string{}
 	for _, key := range hostEnvForCLI {
 		if value, ok := os.LookupEnv(key); ok {
@@ -79,7 +79,11 @@ func (d *Docker) Run(ctx context.Context, spec Spec) (Result, error) {
 	defer cancel()
 	stdout := &cappedBuffer{limit: spec.OutputCap}
 	stderr := &cappedBuffer{limit: spec.OutputCap}
-	code, err := d.exec(runCtx, args, stdout, stderr)
+	var stdin io.Reader
+	if spec.Stdin != nil {
+		stdin = bytes.NewReader(spec.Stdin)
+	}
+	code, err := d.exec(runCtx, args, stdin, stdout, stderr)
 
 	result := Result{
 		ExitCode:  code,
@@ -106,7 +110,7 @@ func (d *Docker) kill(name string) {
 	ctx, cancel := context.WithTimeout(context.Background(), killTimeout)
 	defer cancel()
 	// Best effort: the container may already be gone.
-	_, _ = d.exec(ctx, []string{"kill", name}, io.Discard, io.Discard)
+	_, _ = d.exec(ctx, []string{"kill", name}, nil, io.Discard, io.Discard)
 }
 
 func containerName() (string, error) {
@@ -152,7 +156,7 @@ func (d *Docker) RequireInternalNetwork(ctx context.Context, name string) error 
 	}
 	var stdout, stderr cappedBuffer
 	stdout.limit, stderr.limit = inspectOutputCap, inspectOutputCap
-	code, err := d.exec(ctx, []string{"network", "inspect", "--format", "{{.Internal}} {{.Name}}", name}, &stdout, &stderr)
+	code, err := d.exec(ctx, []string{"network", "inspect", "--format", "{{.Internal}} {{.Name}}", name}, nil, &stdout, &stderr)
 	if err != nil {
 		return fmt.Errorf("sandbox: inspect network %q: %w", name, err)
 	}

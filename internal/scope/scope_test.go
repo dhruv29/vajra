@@ -170,3 +170,20 @@ func TestDeniedErrorNamesTargetAndReason(t *testing.T) {
 		t.Fatalf("Error() = %q", err)
 	}
 }
+
+func TestWildcardBasesAndPortsAreListedInOrder(t *testing.T) {
+	p := mustPolicy(t, Config{
+		Hosts: []string{"app.example.com", "*.staging.example.com", "*.dev.example.com"},
+		Ports: []int{8443, 443},
+	})
+	bases, ports := p.WildcardBases(), p.Ports()
+	if len(bases) != 2 || bases[0] != "dev.example.com" || bases[1] != "staging.example.com" {
+		t.Fatalf("bases = %v", bases)
+	}
+	if len(ports) != 2 || ports[0] != 443 || ports[1] != 8443 {
+		t.Fatalf("ports = %v", ports)
+	}
+	if got := mustPolicy(t, Config{Hosts: []string{"app.example.com"}}).WildcardBases(); len(got) != 0 {
+		t.Fatalf("bases without wildcards = %v", got)
+	}
+}

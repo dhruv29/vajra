@@ -144,6 +144,7 @@ func TestProxyEnvPointsEverySchemeAtTheGate(t *testing.T) {
 
 // fakeDocker stands in for the docker CLI.
 type fakeDocker struct {
+	stdin  string
 	calls  [][]string
 	stdout string
 	code   int
@@ -151,8 +152,12 @@ type fakeDocker struct {
 	block  bool
 }
 
-func (f *fakeDocker) exec(ctx context.Context, args []string, stdout, _ io.Writer) (int, error) {
+func (f *fakeDocker) exec(ctx context.Context, args []string, stdin io.Reader, stdout, _ io.Writer) (int, error) {
 	f.calls = append(f.calls, args)
+	if stdin != nil {
+		raw, _ := io.ReadAll(stdin)
+		f.stdin = string(raw)
+	}
 	if args[0] == "kill" {
 		return 0, nil
 	}
@@ -282,7 +287,7 @@ type inspectDocker struct {
 	calls  [][]string
 }
 
-func (f *inspectDocker) exec(_ context.Context, args []string, stdout, _ io.Writer) (int, error) {
+func (f *inspectDocker) exec(_ context.Context, args []string, _ io.Reader, stdout, _ io.Writer) (int, error) {
 	f.calls = append(f.calls, args)
 	_, _ = io.WriteString(stdout, f.output)
 	return f.code, f.err
@@ -315,5 +320,27 @@ func TestRequireInternalNetwork(t *testing.T) {
 	none := &inspectDocker{}
 	if err := (&Docker{exec: none.exec}).RequireInternalNetwork(context.Background(), NetworkNone); err != nil || len(none.calls) != 0 {
 		t.Fatalf("network none: err = %v, docker calls = %d", err, len(none.calls))
+	}
+}
+
+func TestRunPassesStandardInputOnlyWhenGiven(t *testing.T) {
+	fake := &fakeDocker{}
+	runner := &Docker{exec: fake.exec}
+	spec := validSpec()
+	spec.Stdin = []byte(`{"requests":[]}`)
+
+	if _, err := runner.Run(context.Background(), spec); err != nil {
+		t.Fatal(err)
+	}
+	if fake.stdin != `{"requests":[]}` || !slices.Contains(fake.calls[0], "--interactive") {
+		t.Fatalf("stdin = %q, args = %v", fake.stdin, fake.calls[0])
+	}
+
+	plain := &fakeDocker{}
+	if _, err := (&Docker{exec: plain.exec}).Run(context.Background(), validSpec()); err != nil {
+		t.Fatal(err)
+	}
+	if slices.Contains(plain.calls[0], "--interactive") {
+		t.Fatal("standard input was left open for a tool that was given none")
 	}
 }

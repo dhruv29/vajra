@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"net/netip"
+	"sort"
 	"strings"
 )
 
@@ -267,4 +268,25 @@ func containsAddr(nets []netip.Prefix, addr netip.Addr) bool {
 		}
 	}
 	return false
+}
+
+// WildcardBases returns the domains whose sub-domains are in scope, without
+// the leading "*.". Discovery uses them to know where it may look.
+func (p *Policy) WildcardBases() []string {
+	out := make([]string, 0, len(p.suffixes))
+	for _, suffix := range p.suffixes {
+		out = append(out, strings.TrimPrefix(suffix, "."))
+	}
+	sort.Strings(out)
+	return out
+}
+
+// Ports returns the ports that are in scope, in ascending order.
+func (p *Policy) Ports() []uint16 {
+	out := make([]uint16, 0, len(p.ports))
+	for port := range p.ports {
+		out = append(out, port)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
+	return out
 }

@@ -74,6 +74,9 @@ const (
 	Dynamic Kind = "dast"
 	// Static findings come from analysing source code.
 	Static Kind = "sast"
+	// Dependency findings are known vulnerabilities in third-party packages
+	// the project depends on.
+	Dependency Kind = "sca"
 )
 
 // Location is a place in source code, relative to the scanned source root.

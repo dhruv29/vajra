@@ -49,3 +49,21 @@ func TestStaticStages(t *testing.T) {
 		t.Fatal("stage names are wrong")
 	}
 }
+
+func TestSourceRouterSendsEachFindingBackToItsScanner(t *testing.T) {
+	hit, miss := &fakeReproducer{results: []bool{true}}, &fakeReproducer{results: []bool{false}}
+	router := SourceRouter{"a": hit, "b": miss, "nil": nil}
+
+	matched, err := router.Reproduce(context.Background(), finding.Finding{Source: "a"})
+	if err != nil || !matched || hit.calls != 1 || miss.calls != 0 {
+		t.Fatalf("matched = %v, err = %v", matched, err)
+	}
+	if matched, _ := router.Reproduce(context.Background(), finding.Finding{Source: "b"}); matched {
+		t.Fatal("the wrong reproducer answered")
+	}
+	for _, source := range []string{"unknown", "nil"} {
+		if matched, err := router.Reproduce(context.Background(), finding.Finding{Source: source}); err == nil || matched {
+			t.Errorf("%s: matched = %v, err = %v; an unroutable finding must be an error", source, matched, err)
+		}
+	}
+}

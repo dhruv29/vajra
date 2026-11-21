@@ -20,6 +20,7 @@ import (
 	"github.com/dhruv29/vajra/internal/config"
 	"github.com/dhruv29/vajra/internal/demo"
 	"github.com/dhruv29/vajra/internal/finding"
+	"github.com/dhruv29/vajra/internal/probe"
 	"github.com/dhruv29/vajra/internal/sandbox"
 	"github.com/dhruv29/vajra/internal/server"
 	"github.com/dhruv29/vajra/internal/store"
@@ -75,6 +76,10 @@ func main() {
 }
 
 func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
+	return runWith(ctx, args, os.Stdin, stdout, stderr)
+}
+
+func runWith(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if len(args) == 0 {
 		fmt.Fprint(stderr, usage)
 		return exitUsage
@@ -94,6 +99,8 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		err = runServe(ctx, args[1:], stderr)
 	case "demo":
 		err = runDemo(args[1:], stdout, stderr)
+	case "probe":
+		err = runProbe(ctx, args[1:], stdin, stdout, stderr)
 	case "help", "-h", "--help":
 		fmt.Fprint(stdout, usage)
 	default:
@@ -404,4 +411,20 @@ func runDemo(args []string, stdout, stderr io.Writer) error {
 	}
 	fmt.Fprintf(stdout, "saved sample run %s; view it with: vajra serve -data %s\n", id, *dataDir)
 	return nil
+}
+
+// runProbe is not meant to be typed by a person. The orchestrator starts it
+// inside a sandbox container on the task network, so that Vajra's own
+// requests pass through the egress gate like any other tool's.
+func runProbe(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer) error {
+	flags := flag.NewFlagSet("probe", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	proxy := flags.String("proxy", "", "the egress gate, as http://host:port (required)")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if *proxy == "" {
+		return errors.New("-proxy is required")
+	}
+	return probe.Run(ctx, *proxy, stdin, stdout)
 }

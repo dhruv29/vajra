@@ -53,6 +53,8 @@ type Spec struct {
 	User     string
 	// OutputCap bounds captured stdout and stderr, each, in bytes.
 	OutputCap int
+	// Stdin, when not nil, is written to the tool's standard input.
+	Stdin []byte
 }
 
 // Result is what a sandboxed run produced.
@@ -204,8 +206,12 @@ func DockerArgs(s Spec, name string) ([]string, error) {
 		return nil, fmt.Errorf("sandbox: container name %q is malformed", name)
 	}
 	memory := strconv.Itoa(s.MemoryMB) + "m"
-	args := []string{
-		"run", "--rm", "--name", name,
+	args := []string{"run"}
+	if s.Stdin != nil {
+		args = append(args, "--interactive") // keep standard input open
+	}
+	args = append(args,
+		"--rm", "--name", name,
 		"--label", containerTag, // lets leftover containers be found and removed
 		"--network", s.Network,
 		"--read-only",
@@ -217,7 +223,7 @@ func DockerArgs(s Spec, name string) ([]string, error) {
 		"--cpus", strconv.FormatFloat(s.CPUs, 'f', 2, 64),
 		"--user", s.User,
 		"--tmpfs", tmpfsOptions,
-	}
+	)
 	if s.Workdir != "" {
 		args = append(args, "--workdir", s.Workdir)
 	}

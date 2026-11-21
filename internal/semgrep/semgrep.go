@@ -78,15 +78,23 @@ func (s *Scanner) Scan(ctx context.Context) ([]finding.Finding, error) {
 	return s.run(ctx, ".")
 }
 
+// ScanFile analyses one file, given relative to the source root.
+func (s *Scanner) ScanFile(ctx context.Context, relPath string) ([]finding.Finding, error) {
+	if !finding.SafeRelPath(relPath) {
+		return nil, fmt.Errorf("semgrep: %q is not a file inside the source tree", relPath)
+	}
+	// The "./" prefix keeps a file name that starts with "-" from being read
+	// as a command-line flag.
+	return s.run(ctx, "./"+relPath)
+}
+
 // Reproduce re-analyses only the file behind f and reports whether the same
 // rule still matches the same line.
 func (s *Scanner) Reproduce(ctx context.Context, f finding.Finding) (bool, error) {
 	if f.Location == nil || !finding.SafeRelPath(f.Location.File) {
 		return false, errors.New("semgrep: the finding has no usable file location")
 	}
-	// The "./" prefix keeps a file name that starts with "-" from being read
-	// as a command-line flag.
-	results, err := s.run(ctx, "./"+f.Location.File)
+	results, err := s.ScanFile(ctx, f.Location.File)
 	if err != nil {
 		return false, err
 	}
