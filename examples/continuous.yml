@@ -1,0 +1,52 @@
+# Example: test on every push and report only what changed.
+#
+# Copy to .github/workflows/ in the repository of the application you test,
+# on a runner that can reach the application and has Docker. It assumes a
+# Vajra checkout at ./vajra and a run configuration at security/run.json.
+#
+# The job fails when a finding needs attention that the baseline run did not
+# have, so known issues do not block every build while new ones do.
+name: security
+
+on:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "0 3 * * *" # nightly, to catch newly published advisories
+
+permissions:
+  contents: read
+
+jobs:
+  vajra:
+    runs-on: self-hosted
+    env:
+      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build Vajra and its images
+        run: make -C vajra build images
+      - name: Start the gate
+        run: |
+          mkdir -p data/audit && chmod 777 data/audit
+          VAJRA_CONFIG="$PWD/security/run.json" VAJRA_AUDIT_DIR="$PWD/data/audit" \
+            docker compose -f vajra/deploy/docker-compose.yml up -d --build
+      - name: Scan, and compare with the last accepted run
+        run: |
+          baseline="$(cat security/baseline-run-id)"
+          vajra/vajra scan -config security/run.json -data data \
+            -gate-audit data/audit/audit.jsonl -baseline "$baseline" -fail-on-new
+      - name: New advisories for what is already deployed
+        if: github.event_name == 'schedule'
+        run: vajra/vajra exposure -data data -run "$(cat security/baseline-run-id)"
+      - name: Keep the reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: vajra-run
+          path: data/runs/
+      - name: Stop the gate and remove leftovers
+        if: always()
+        run: |
+          docker compose -f vajra/deploy/docker-compose.yml down
+          vajra/vajra cleanup

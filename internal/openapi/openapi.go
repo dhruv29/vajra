@@ -179,10 +179,17 @@ func (p parser) operations() []Operation {
 // already taken. The ID becomes a request ID, and responses are matched to
 // requests by it.
 func uniqueIDs(operations []Operation) []Operation {
+	// Fallback IDs are reserved first, so that an operationId which happens
+	// to look like another operation's "METHOD /path" cannot take it.
+	fallback := map[string]bool{}
+	for _, op := range operations {
+		fallback[op.Method+" "+op.Path] = true
+	}
 	taken := map[string]bool{}
 	for i, op := range operations {
-		if op.ID == "" || taken[op.ID] {
-			operations[i].ID = op.Method + " " + op.Path
+		own := op.Method + " " + op.Path
+		if op.ID == "" || taken[op.ID] || (fallback[op.ID] && op.ID != own) {
+			operations[i].ID = own
 		}
 		taken[operations[i].ID] = true
 	}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/dhruv29/vajra/internal/budget"
 	"github.com/dhruv29/vajra/internal/finding"
 	"github.com/dhruv29/vajra/internal/verify"
 )
@@ -17,6 +18,9 @@ type Panel struct {
 	Second  verify.Refuter
 	// MinSeverity is the lowest severity that gets a second opinion.
 	MinSeverity finding.Severity
+	// Budget, when set, is charged one turn for each second opinion. The
+	// first reviewer's turn is charged by the verification stage.
+	Budget *budget.Budget
 }
 
 // Refute returns the primary reviewer's verdict, unless it supports a finding
@@ -28,6 +32,14 @@ func (p Panel) Refute(ctx context.Context, f finding.Finding) (verify.Refutation
 	}
 	if first.Verdict != verify.Holds || f.Severity.Rank() < p.MinSeverity.Rank() {
 		return first, nil
+	}
+	if p.Budget != nil {
+		if err := p.Budget.SpendTurn(); err != nil {
+			return verify.Refutation{
+				Verdict: verify.Uncertain,
+				Reason:  fmt.Sprintf("The first reviewer held the finding (%s) but there was no budget left for the second: %v", first.Reason, err),
+			}, nil
+		}
 	}
 	second, err := p.Second.Refute(ctx, f)
 	if err != nil {

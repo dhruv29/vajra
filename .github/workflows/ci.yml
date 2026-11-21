@@ -1,0 +1,45 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# The workflow only reads the repository. It uses no secrets, so a pull
+# request from a fork runs the same checks with nothing to steal.
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Format
+        run: test -z "$(gofmt -l .)" || (gofmt -l . && exit 1)
+      - name: Vet
+        run: go vet ./...
+      - name: Test
+        run: go test ./... -race -cover
+      - name: Web interface syntax
+        run: node --check internal/server/web/app.js
+      - name: Reproducible build
+        run: |
+          make build BINARY=first && make build BINARY=second
+          cmp first second
+      - name: Software bill of materials
+        run: make sbom && test -s sbom.json
+
+  e2e:
+    runs-on: ubuntu-latest
+    needs: check
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: End-to-end against the lab target
+        run: ./scripts/e2e.sh

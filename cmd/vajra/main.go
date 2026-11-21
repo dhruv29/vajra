@@ -21,6 +21,7 @@ import (
 	"github.com/dhruv29/vajra/internal/demo"
 	"github.com/dhruv29/vajra/internal/finding"
 	"github.com/dhruv29/vajra/internal/probe"
+	"github.com/dhruv29/vajra/internal/record"
 	"github.com/dhruv29/vajra/internal/sandbox"
 	"github.com/dhruv29/vajra/internal/server"
 	"github.com/dhruv29/vajra/internal/store"
@@ -43,23 +44,50 @@ const usage = `vajra: security testing that proves its findings
 
 Usage:
   vajra scan   -config run.json [-out report.json] [-data DIR] [-gate-audit FILE] [-fail-on-confirmed]
+               [-baseline RUN] [-fail-on-new] [-notify]
   vajra verify -config run.json -in nuclei.jsonl [-out report.json] [-data DIR] [-gate-audit FILE] [-fail-on-confirmed]
-  vajra gate   -config run.json [-listen :3128] [-audit audit.jsonl]
-  vajra runs   -data DIR
-  vajra report -data DIR -run ID [-format html|md|json] [-out FILE]
-  vajra serve  -data DIR [-listen 127.0.0.1:8700]
-  vajra demo   -data DIR
+               [-baseline RUN] [-fail-on-new] [-notify]
+  vajra gate   -config run.json [-listen :3128] [-socks ADDR] [-audit audit.jsonl]
+  vajra stop   -data DIR
+  vajra cleanup
 
-  scan    run the scanner against the configured targets, then verify each result
-  verify  verify scanner output saved earlier
-  gate    run the egress proxy that enforces the scope for task containers
-  runs    list the runs saved in a data directory
-  report  render a saved run, with the blast radius of each finding
-  serve   open the web interface over saved runs, on this machine only
-  demo    save a sample run, to explore the reports and the interface
+  vajra runs     -data DIR
+  vajra report   -data DIR -run ID [-format html|md|json] [-out FILE]
+  vajra serve    -data DIR [-listen 127.0.0.1:8700]
+  vajra diff     -data DIR -base ID -head ID [-format md|json] [-fail-on-new]
+  vajra bench    -data DIR -run ID -key FILE [-min-precision 0.9] [-min-recall 0.9] [-json]
+  vajra exposure -data DIR -run ID [-json]
+  vajra fix      -config run.json -data DIR -run ID -finding ID [-out FILE.patch]
+  vajra demo     -data DIR
+
+  vajra keygen           -private FILE -public FILE
+  vajra sign             -in FILE -key PRIVATE [-out FILE.sig]
+  vajra verify-signature -in FILE -sig FILE.sig -public PUBLIC
+
+  scan      run the scanner against the configured targets, then verify each result
+  verify    verify scanner output saved earlier
+  gate      run the egress proxy that enforces the scope for task containers
+  stop      tell a running scan's autonomous explorer to stop after its current step
+  cleanup   remove sandbox containers left behind by an interrupted run
+
+  runs      list the runs saved in a data directory
+  report    render a saved run, with the blast radius of each finding
+  serve     open the web interface over saved runs, on this machine only
+  diff      show what changed between two saved runs
+  bench     score a saved run against an answer key of known issues and decoys
+  exposure  check a saved run's dependencies for advisories published since
+  fix       propose a patch for one code finding and check it against the rule
+  demo      save a sample run, to explore the reports and the interface
+
+  keygen            create a key pair for signing reports
+  sign              sign a file, such as a report, with a private key
+  verify-signature  check that a file is the one that was signed
 
 With -data, scan and verify also save the run so that it can be reported on.
 -gate-audit adds the gate's audit log, which shows what the run touched.
+-baseline compares the new run with an earlier one; -notify posts a summary
+of it to the configured webhook. diff, bench, exposure and fix exit with
+status 3 when they have something to act on; see each command's -h.
 `
 
 // newDeps builds the real dependencies of a run. Tests replace it so that
@@ -88,7 +116,7 @@ func runWith(ctx context.Context, args []string, stdin io.Reader, stdout, stderr
 	code := exitOK
 	switch args[0] {
 	case "scan", "verify":
-		code, err = runReport(ctx, args[0], args[1:], stdout, stderr)
+		code, err = runReport(ctx, args[0], args[1:], stdin, stdout, stderr)
 	case "gate":
 		err = runGate(ctx, args[1:], stderr)
 	case "runs":
@@ -99,6 +127,24 @@ func runWith(ctx context.Context, args []string, stdin io.Reader, stdout, stderr
 		err = runServe(ctx, args[1:], stderr)
 	case "demo":
 		err = runDemo(args[1:], stdout, stderr)
+	case "stop":
+		err = runStop(args[1:], stdout, stderr)
+	case "cleanup":
+		err = runCleanup(ctx, args[1:], stdout, stderr)
+	case "diff":
+		code, err = runDiff(args[1:], stdout, stderr)
+	case "bench":
+		code, err = runBench(args[1:], stdout, stderr)
+	case "exposure":
+		code, err = runExposure(ctx, args[1:], stdout, stderr)
+	case "fix":
+		code, err = runFix(ctx, args[1:], stdout, stderr)
+	case "keygen":
+		err = runKeygen(args[1:], stdout, stderr)
+	case "sign":
+		err = runSign(args[1:], stdout, stderr)
+	case "verify-signature":
+		err = runVerifySignature(args[1:], stdout, stderr)
 	case "probe":
 		err = runProbe(ctx, args[1:], stdin, stdout, stderr)
 	case "help", "-h", "--help":
@@ -117,7 +163,7 @@ func runWith(ctx context.Context, args []string, stdin io.Reader, stdout, stderr
 	return code
 }
 
-func runReport(ctx context.Context, command string, args []string, stdout, stderr io.Writer) (int, error) {
+func runReport(ctx context.Context, command string, args []string, stdin io.Reader, stdout, stderr io.Writer) (int, error) {
 	flags := flag.NewFlagSet(command, flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	configPath := flags.String("config", "", "path to the run configuration (required)")
@@ -126,16 +172,24 @@ func runReport(ctx context.Context, command string, args []string, stdout, stder
 	failOnConfirmed := flags.Bool("fail-on-confirmed", false, "exit with status 3 when any finding is confirmed")
 	dataDir := flags.String("data", "", "also save the run in this data directory")
 	gateAudit := flags.String("gate-audit", "", "the gate's audit log, to record what the run touched (needs -data)")
+	baselineID := flags.String("baseline", "", "ID of an earlier saved run; what changed since is printed to standard error (needs -data)")
+	failOnNew := flags.Bool("fail-on-new", false, "exit with status 3 when the run has findings the baseline did not (needs -baseline)")
+	notify := flags.Bool("notify", false, "post a summary of the saved run to the configured webhook (needs -data)")
 	if err := flags.Parse(args); err != nil {
 		return exitUsage, err
 	}
-	if *gateAudit != "" && *dataDir == "" {
-		return exitUsage, errors.New("-gate-audit needs -data")
+	if err := checkSaveFlags(*dataDir, *gateAudit, *baselineID, *failOnNew, *notify); err != nil {
+		return exitUsage, err
 	}
 	if *configPath == "" {
 		return exitUsage, errors.New("-config is required")
 	}
 	cfg, policy, err := config.Load(*configPath)
+	if err != nil {
+		return exitError, err
+	}
+	// Loaded before anything runs: a mistyped ID should not cost a whole scan.
+	baseline, err := loadBaseline(*dataDir, *baselineID)
 	if err != nil {
 		return exitError, err
 	}
@@ -157,18 +211,24 @@ func runReport(ctx context.Context, command string, args []string, stdout, stder
 			return exitError, err
 		}
 	} else {
+		deps, err = withOperatorControls(deps, cfg, *dataDir, stdin, stderr)
+		if err != nil {
+			return exitError, err
+		}
 		report, err = app.Scan(ctx, cfg, policy, deps)
 		if err != nil {
 			return exitError, err
 		}
 	}
 
+	var saved *record.Run
 	if *dataDir != "" {
-		id, err := saveRun(report, cfg, *dataDir, *gateAudit, started)
+		run, err := saveRun(report, cfg, *dataDir, *gateAudit, started)
 		if err != nil {
 			return exitError, err
 		}
-		fmt.Fprintf(stderr, "vajra: saved run %s\n", id)
+		fmt.Fprintf(stderr, "vajra: saved run %s\n", run.ID)
+		saved = &run
 	}
 	if *outPath != "" || *dataDir == "" {
 		if err := writeReport(report, *outPath, stdout); err != nil {
@@ -178,7 +238,14 @@ func runReport(ctx context.Context, command string, args []string, stdout, stder
 	fmt.Fprintf(stderr, "vajra: %d confirmed, %d unconfirmed, %d refuted, %d out of scope\n",
 		report.Summary[finding.Confirmed], report.Summary[finding.Unconfirmed],
 		report.Summary[finding.Refuted], report.Summary[finding.OutOfScope])
+	if saved != nil && *notify {
+		notifyRun(ctx, cfg, deps, *saved, stderr)
+	}
+	hasNew := saved != nil && baseline != nil && printChanges(*baseline, *saved, stderr)
 	if *failOnConfirmed && report.Summary[finding.Confirmed] > 0 {
+		return exitConfirmed, nil
+	}
+	if *failOnNew && hasNew {
 		return exitConfirmed, nil
 	}
 	return exitOK, nil
@@ -203,6 +270,7 @@ func runGate(ctx context.Context, args []string, stderr io.Writer) error {
 	configPath := flags.String("config", "", "path to the run configuration (required)")
 	listen := flags.String("listen", "127.0.0.1:3128", "address the proxy listens on; it has no authentication, so expose it only to the task network")
 	auditPath := flags.String("audit", "", "append the audit log here instead of standard error")
+	socksAddr := flags.String("socks", "", "also serve SOCKS5 on this address, for tools that speak raw TCP; off when empty, and as unauthenticated as -listen")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -232,25 +300,33 @@ func runGate(ctx context.Context, args []string, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
+	// Closing twice is harmless, and this covers every way out, including the
+	// ones where the gate never started serving.
+	defer listener.Close()
 	fmt.Fprintf(stderr, "vajra: egress gate listening on %s\n", listener.Addr())
-	return app.ServeGate(ctx, policy, listener, nil, audit)
+	// A nil interface, not a nil *net.TCPListener: ServeGate tests for nil.
+	var socks net.Listener
+	if *socksAddr != "" {
+		if socks, err = net.Listen("tcp", *socksAddr); err != nil {
+			return err
+		}
+		defer socks.Close()
+		fmt.Fprintf(stderr, "vajra: egress gate listening for SOCKS5 on %s\n", socks.Addr())
+	}
+	return app.ServeGate(ctx, policy, listener, socks, audit)
 }
 
-func saveRun(report app.Report, cfg config.Config, dataDir, auditPath string, started time.Time) (string, error) {
+func saveRun(report app.Report, cfg config.Config, dataDir, auditPath string, started time.Time) (record.Run, error) {
 	var audit io.Reader
 	if auditPath != "" {
 		f, err := os.Open(auditPath)
 		if err != nil {
-			return "", err
+			return record.Run{}, err
 		}
 		defer f.Close()
 		audit = f
 	}
-	run, err := app.Record(report, cfg, audit, started, dataDir, time.Now())
-	if err != nil {
-		return "", err
-	}
-	return run.ID, nil
+	return app.Record(report, cfg, audit, started, dataDir, time.Now())
 }
 
 func runList(args []string, stdout, stderr io.Writer) error {

@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/dhruv29/vajra/internal/budget"
 	"github.com/dhruv29/vajra/internal/finding"
@@ -301,10 +302,14 @@ func writeCode(b *strings.Builder, f finding.Finding, nonce string) {
 // structure of the prompt or swell the request.
 func oneLine(s string) string {
 	s = strings.Join(strings.Fields(s), " ")
-	if len(s) > maxLabelBytes {
-		return s[:maxLabelBytes] + " [truncated]"
+	if len(s) <= maxLabelBytes {
+		return s
 	}
-	return s
+	cut := maxLabelBytes
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut-- // never cut inside a multi-byte character
+	}
+	return s[:cut] + " [truncated]"
 }
 
 func clip(s string) string {

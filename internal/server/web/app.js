@@ -4,6 +4,17 @@
 
 const SVG_NS = "http://www.w3.org/2000/svg";
 const STATUSES = ["confirmed", "unconfirmed", "refuted", "out_of_scope"];
+// How a finding was found. Findings saved before kinds existed have none and
+// all came from testing a running application.
+const KINDS = [
+  { value: "dast", filter: "Live", name: "live test", badge: null },
+  { value: "sast", filter: "Code", name: "code analysis", badge: "code" },
+  { value: "sca", filter: "Dependency", name: "dependency", badge: "dependency" },
+];
+const DEFAULT_KIND = "dast";
+const MAX_LIST_ROWS = 200;
+// Chains beyond this many are folded away, so the findings stay within reach.
+const MAX_CHAINS_SHOWN = 3;
 const TOKEN_KEY = "vajra-token";
 const NODE = { width: 178, height: 46, columnGap: 54, rowGap: 16, pad: 12, maxLabel: 25 };
 
@@ -47,7 +58,11 @@ function takeToken(params) {
 
 function readState() {
   const params = new URLSearchParams(location.hash.slice(1));
-  return { params, run: params.get("run"), finding: params.get("finding"), status: params.get("status") };
+  const kind = params.get("kind");
+  return {
+    params, run: params.get("run"), finding: params.get("finding"), status: params.get("status"),
+    kind: KINDS.some((known) => known.value === kind) ? kind : null,
+  };
 }
 
 function writeState(changes) {
@@ -91,18 +106,40 @@ function renderRuns(runs, currentID) {
   }
   for (const run of runs) {
     const confirmed = run.counts?.confirmed || 0;
-    const button = el("button", { type: "button", "aria-current": run.id === currentID ? "true" : null },
+    const button = el("button",
+      { type: "button", "data-key": "run:" + run.id, "aria-current": run.id === currentID ? "true" : null },
       el("span", { class: "when" }, new Date(run.generated_at).toLocaleString()),
       el("span", { class: "tally" + (confirmed ? "" : " zero"), title: "Confirmed findings" }, String(confirmed)),
       el("span", { class: "target" }, (run.targets || []).join(", ")));
-    button.addEventListener("click", () => writeState({ run: run.id, finding: null, status: null }));
+    button.addEventListener("click", () => writeState({ run: run.id, finding: null, status: null, kind: null }));
     list.append(el("li", {}, button));
   }
 }
 
 // ---- Overview ------------------------------------------------------------
 
-function renderOverview(run, statusFilter) {
+function kindOf(finding) {
+  return KINDS.find((known) => known.value === (finding.kind || DEFAULT_KIND)) ||
+    { value: String(finding.kind), filter: null, name: label(finding.kind), badge: label(finding.kind) };
+}
+
+/** The kind filter: All, then one button per kind, each with its count. */
+function renderKindFilter(findings, kindFilter) {
+  const group = $("kinds");
+  group.replaceChildren(el("span", { class: "eyebrow", "aria-hidden": "true" }, "Found by"));
+  const options = [{ value: null, filter: "All", n: findings.length },
+    ...KINDS.map((kind) => ({ ...kind, n: findings.filter((finding) => kindOf(finding).value === kind.value).length }))];
+  for (const option of options) {
+    const pressed = (kindFilter || null) === option.value;
+    const button = el("button",
+      { type: "button", "data-key": "kind:" + (option.value || "all"), "aria-pressed": String(pressed) },
+      option.filter, el("span", { class: "n" }, String(option.n)));
+    button.addEventListener("click", () => writeState({ kind: option.value, finding: null }));
+    group.append(button);
+  }
+}
+
+function renderOverview(run, statusFilter, kindFilter) {
   const report = run.report;
   const counts = report.summary || {};
   const attention = (counts.confirmed || 0) + (counts.unconfirmed || 0);
@@ -128,11 +165,12 @@ function renderOverview(run, statusFilter) {
   tiles.replaceChildren();
   for (const status of STATUSES) {
     const pressed = statusFilter === status;
-    const tile = el("button", { type: "button", "aria-pressed": String(pressed) },
+    const tile = el("button", { type: "button", "data-key": "status:" + status, "aria-pressed": String(pressed) },
       el("b", {}, String(counts[status] || 0)), el("span", {}, label(status)));
     tile.addEventListener("click", () => writeState({ status: pressed ? null : status, finding: null }));
     tiles.append(tile);
   }
+  renderKindFilter(report.findings || [], kindFilter);
   $("overview").hidden = false;
 }
 
@@ -143,10 +181,11 @@ function radiusOf(run, findingID) {
 }
 
 /** Findings ordered by blast radius, with dismissed results last. */
-function orderedFindings(run, statusFilter) {
+function orderedFindings(run, statusFilter, kindFilter) {
   const dismissed = (finding) => (finding.status === "refuted" || finding.status === "out_of_scope" ? 1 : 0);
   return (run.report.findings || [])
     .filter((finding) => !statusFilter || finding.status === statusFilter)
+    .filter((finding) => !kindFilter || kindOf(finding).value === kindFilter)
     .map((finding) => ({ finding, radius: radiusOf(run, finding.id) }))
     .sort((a, b) => dismissed(a.finding) - dismissed(b.finding) || b.radius.score - a.radius.score);
 }
@@ -155,19 +194,80 @@ function renderFindings(items, currentID) {
   const list = $("findings");
   list.replaceChildren();
   if (items.length === 0) {
-    list.append(el("li", { class: "empty" }, "No findings with this status."));
+    list.append(el("li", { class: "empty" }, "No findings match these filters."));
     return;
   }
   for (const { finding, radius } of items) {
+    const badge = kindOf(finding).badge;
     const button = el("button",
-      { type: "button", class: finding.status, "aria-current": finding.id === currentID ? "true" : null },
+      { type: "button", class: finding.status, "data-key": "finding:" + finding.id, "aria-current": finding.id === currentID ? "true" : null },
       el("span", { class: "title" }, finding.title || finding.rule_id,
-        finding.kind === "sast" ? el("span", { class: "kind-badge" }, "code") : null),
+        badge ? el("span", { class: "kind-badge" }, badge) : null),
       el("span", { class: "score" + (radius.score ? "" : " none"), title: "Blast radius score out of 100" }, String(radius.score)),
       el("span", { class: "where" }, finding.target));
     button.addEventListener("click", () => writeState({ finding: finding.id }));
     list.append(el("li", {}, button));
   }
+}
+
+// ---- Selecting a finding from elsewhere on the page ----------------------
+
+let focusDetailNext = false;
+
+/**
+ * Select a finding from a chain step or a corroboration link. A filter that
+ * would hide the finding is cleared, and the detail takes focus once drawn.
+ */
+function selectFinding(run, findingID) {
+  const state = readState();
+  const target = (run.report.findings || []).find((finding) => finding.id === findingID);
+  const changes = { finding: findingID };
+  if (target && state.status && target.status !== state.status) changes.status = null;
+  if (target && state.kind && kindOf(target).value !== state.kind) changes.kind = null;
+  focusDetailNext = true;
+  if (Object.entries(changes).every(([key, value]) => (state[key] || null) === value)) render();
+  else writeState(changes);
+}
+
+// ---- Attack chains -------------------------------------------------------
+
+function chainItem(run, chain, index, currentID) {
+  const steps = el("ol", { class: "chain-steps" });
+  (chain.steps || []).forEach((step, position) => {
+    const button = el("button",
+      { type: "button", "aria-current": step.finding_id === currentID ? "true" : null },
+      el("span", { class: "n", "aria-hidden": "true" }, String(position + 1)),
+      el("span", { class: "title" }, step.title || step.finding_id),
+      el("span", { class: "tag" }, label(step.capability || "unclassified")),
+      el("span", { class: "why" }, step.why || ""));
+    button.addEventListener("click", () => selectFinding(run, step.finding_id));
+    steps.append(el("li", {}, button));
+  });
+  const classes = (chain.data_classes || []).join(", ");
+  return el("li", { class: "chain" },
+    el("div", { class: "chain-head" },
+      el("h3", {}, `Chain ${index + 1}`),
+      el("div", { class: "radius-score" }, String(chain.score ?? 0), el("small", {}, "/ 100"))),
+    el("p", {}, chain.summary || ""),
+    steps,
+    el("p", { class: "basis" }, "Data classes reached: " + (classes || "none")));
+}
+
+/** The highest-scoring chains, with the rest folded behind a disclosure. */
+function renderChains(run, currentID) {
+  const chains = run.chains || [];
+  const items = chains.map((chain, index) => chainItem(run, chain, index, currentID));
+  $("chains-body").replaceChildren(...items.slice(0, MAX_CHAINS_SHOWN));
+  const rest = items.slice(MAX_CHAINS_SHOWN);
+  const more = $("chains-more");
+  const wasOpen = more.firstElementChild?.open || false;
+  more.replaceChildren();
+  if (rest.length > 0) {
+    more.append(el("details", { class: "more-chains", open: wasOpen ? "" : null },
+      el("summary", {}, rest.length === 1 ? "1 more chain" : `${rest.length} more chains`),
+      el("ol", { class: "chain-list" }, ...rest)));
+  }
+  $("chains").hidden = chains.length === 0;
 }
 
 // ---- Blast radius graph --------------------------------------------------
@@ -260,7 +360,33 @@ function traceTable(trace) {
     el("thead", {}, el("tr", {}, el("th", {}, "Step"), el("th", {}, "Where"), el("th", {}, "Code"))), body));
 }
 
-function renderDetail(item) {
+/** The findings of the other kind that show the same weakness, as buttons. */
+function corroboration(run, finding) {
+  const others = (finding.corroborated_by || [])
+    .map((id) => (run.report.findings || []).find((other) => other.id === id))
+    .filter((other) => other);
+  if (others.length === 0) return null;
+  const list = el("ul", { class: "corroborated" });
+  for (const other of others) {
+    const button = el("button", { type: "button" },
+      el("span", { class: "title" }, other.title || other.rule_id),
+      el("span", { class: "kind-badge" }, kindOf(other).name),
+      el("span", { class: "where" }, other.target));
+    button.addEventListener("click", () => selectFinding(run, other.id));
+    list.append(el("li", {}, button));
+  }
+  return el("div", {}, el("h4", {}, "Corroborated by"), list);
+}
+
+/** The package a dependency finding is about, e.g. npm/lodash@4.17.20. */
+function packageLine(finding) {
+  const extracted = finding.evidence?.extracted || [];
+  if (kindOf(finding).value !== "sca" || extracted.length === 0) return null;
+  return el("p", { class: "package" },
+    el("span", { class: "eyebrow" }, "Package"), ...extracted.map((coordinate) => el("code", {}, coordinate)));
+}
+
+function renderDetail(run, item) {
   const body = $("detail-body");
   body.replaceChildren();
   if (!item) {
@@ -282,10 +408,13 @@ function renderDetail(item) {
     el("div", { class: "tags" },
       el("span", { class: "tag " + finding.status }, label(finding.status)),
       el("span", { class: "tag" }, finding.severity),
-      radius.capability ? el("span", { class: "tag" }, label(radius.capability)) : null),
+      radius.capability ? el("span", { class: "tag" }, label(radius.capability)) : null,
+      el("span", { class: "tag kind" }, kindOf(finding).name)),
     el("h3", {}, finding.title || finding.rule_id),
     el("p", { class: "where" }, finding.target),
+    packageLine(finding),
     finding.description ? el("p", {}, finding.description) : null,
+    corroboration(run, finding),
 
     el("div", { class: "radius-head" },
       el("p", { class: "eyebrow" }, "Blast radius"),
@@ -346,6 +475,69 @@ function renderRunReach(run) {
   $("reach").hidden = false;
 }
 
+// ---- Activity ------------------------------------------------------------
+
+/** A titled list, or null when there is nothing to list. Long lists are cut. */
+function activityList(title, items, note) {
+  if (!items || items.length === 0) return null;
+  const list = el("ul", { class: "plain" });
+  for (const item of items.slice(0, MAX_LIST_ROWS)) list.append(el("li", {}, item));
+  if (items.length > MAX_LIST_ROWS) list.append(el("li", { class: "basis" }, `and ${items.length - MAX_LIST_ROWS} more`));
+  return el("div", {}, el("h3", {}, `${title} (${items.length})`), note ? el("p", { class: "basis" }, note) : null, list);
+}
+
+function figure(value, name) {
+  return el("div", {}, el("dt", {}, name), el("dd", {}, String(value)));
+}
+
+/** The autonomous explorer's steps in order, and why it stopped. */
+function explorerTimeline(activity) {
+  const steps = activity.agent_steps || [];
+  if (steps.length === 0 && !activity.agent_stopped && !activity.agent_summary) return null;
+  const timeline = el("ol", { class: "timeline" });
+  for (const step of steps.slice(0, MAX_LIST_ROWS)) {
+    timeline.append(el("li", {},
+      el("span", { class: "n" }, String(step.n)),
+      el("span", { class: "tag" }, label(step.tool)),
+      el("span", { class: "summary" }, step.summary),
+      el("span", { class: "outcome" }, step.outcome)));
+  }
+  return el("div", { class: "explorer" },
+    el("h3", {}, "Autonomous explorer"),
+    steps.length > 0 ? timeline : null,
+    steps.length > MAX_LIST_ROWS ? el("p", { class: "basis" }, `and ${steps.length - MAX_LIST_ROWS} more step(s)`) : null,
+    activity.agent_stopped ? el("p", {}, el("strong", {}, "Why it stopped: "), activity.agent_stopped) : null,
+    activity.agent_summary ? el("p", {}, el("strong", {}, "Its summary: "), activity.agent_summary) : null);
+}
+
+function renderActivity(run) {
+  const activity = run.report.activity || {};
+  const body = $("activity-body");
+  body.replaceChildren();
+
+  const pages = activity.pages_crawled || 0;
+  const endpoints = (activity.endpoints || []).length;
+  const packages = (activity.packages || []).length;
+  const crawled = pages > 0 || endpoints > 0 || Boolean(activity.crawl_truncated);
+  const figures = el("dl", { class: "figures" });
+  if (crawled) figures.append(figure(pages, "pages crawled"), figure(endpoints, "endpoints found"));
+  if (packages > 0) figures.append(figure(packages, "packages inventoried"));
+
+  const lists = el("div", { class: "activity-grid" });
+  add(lists,
+    activityList("Hosts discovered", activity.discovered_hosts),
+    activityList("Hosts rejected", activity.rejected_hosts, "They resolve to addresses outside the scope, so nothing was sent to them."),
+    activityList("API operations skipped", activity.skipped_operations),
+    activityList("Notes", activity.notes));
+
+  add(body,
+    figures.childElementCount > 0 ? figures : null,
+    activity.crawl_truncated ? el("p", { class: "basis" }, "Crawling stopped at its limit, so some pages were not visited.") : null,
+    lists.childElementCount > 0 ? lists : null,
+    explorerTimeline(activity));
+  $("activity").hidden = body.childElementCount === 0;
+}
+
 // ---- Export --------------------------------------------------------------
 
 async function exportReport(runID, format) {
@@ -364,6 +556,27 @@ async function exportReport(runID, format) {
 
 let loaded = { id: null, run: null };
 
+/**
+ * Drawing replaces the buttons, which would drop keyboard focus. Put it back
+ * on the button that had it, or on the detail when a finding was picked from
+ * a chain or a corroboration link.
+ */
+function restoreFocus(focusedKey) {
+  if (focusDetailNext) {
+    focusDetailNext = false;
+    $("detail").focus();
+    $("detail").scrollIntoView({ block: "nearest" });
+    return;
+  }
+  if (!focusedKey) return;
+  for (const candidate of document.querySelectorAll("[data-key]")) {
+    if (candidate.dataset.key === focusedKey) {
+      candidate.focus({ preventScroll: true });
+      return;
+    }
+  }
+}
+
 async function render() {
   const state = readState();
   try {
@@ -371,23 +584,28 @@ async function render() {
     const runID = state.run || runs[0]?.id || null;
     renderRuns(runs, runID);
     if (!runID) {
-      for (const id of ["overview", "workbench", "reach", "exports"]) $(id).hidden = true;
+      for (const id of ["overview", "chains", "workbench", "reach", "activity", "exports"]) $(id).hidden = true;
       return;
     }
     if (loaded.id !== runID) {
       loaded = { id: runID, run: await (await api("/api/runs/" + encodeURIComponent(runID))).json() };
     }
     const run = loaded.run;
-    const items = orderedFindings(run, state.status);
+    const items = orderedFindings(run, state.status, state.kind);
     const current = items.find((item) => item.finding.id === state.finding) || items[0] || null;
-    renderOverview(run, state.status);
+    const focusedKey = document.activeElement?.dataset?.key;
+    renderOverview(run, state.status, state.kind);
+    renderChains(run, current?.finding.id);
     renderFindings(items, current?.finding.id);
-    renderDetail(current);
+    renderDetail(run, current);
     renderRunReach(run);
+    renderActivity(run);
+    restoreFocus(focusedKey);
     $("workbench").hidden = false;
     $("exports").hidden = false;
     notify("");
   } catch (error) {
+    focusDetailNext = false;
     notify(error.status === 401
       ? "This session has no valid access token. Open the link that vajra serve printed."
       : "Could not load: " + error.message);

@@ -52,6 +52,20 @@ td { padding: .5rem .6rem; border-bottom: 1px solid var(--rule); vertical-align:
 details { margin-top: .7rem; } summary { cursor: pointer; font-weight: 600; font-size: .9rem; }
 pre { font: .8rem/1.45 var(--mono); background: #f1efe9; border: 1px solid var(--rule); padding: .8rem; overflow-x: auto; white-space: pre-wrap; overflow-wrap: anywhere; margin: .5rem 0 0; }
 .note { color: var(--muted); font-size: .92rem; }
+h4 { font: 600 .72rem/1 var(--sans); letter-spacing: .14em; text-transform: uppercase; color: var(--muted); margin: 1.6rem 0 .5rem; }
+.sub { margin-top: 1.8rem; }
+.tag.kind { color: var(--muted); border-style: dashed; }
+.related { margin: .6rem 0; font-size: .92rem; }
+.related ul, .plain { margin: .3rem 0 0; padding-left: 1.2rem; }
+.plain li, .related li { overflow-wrap: anywhere; }
+.chain { background: var(--panel); border: 1px solid var(--ink); margin: 0 0 1.6rem; padding: 1.4rem 1.5rem; break-inside: avoid; }
+.chain-steps { list-style: none; margin: 1rem 0; padding: 0; counter-reset: chain; border-left: 2px solid var(--confirmed); }
+.chain-steps li { counter-increment: chain; position: relative; padding: .1rem 0 1rem 2.6rem; }
+.chain-steps li:last-child { padding-bottom: .1rem; }
+.chain-steps li::before { content: counter(chain); position: absolute; left: -1px; top: 0; width: 1.8rem; height: 1.8rem; background: var(--confirmed); color: var(--panel); font: 600 1rem/1.8rem var(--serif); text-align: center; }
+.chain-steps strong { display: block; font: 600 1.05rem/1.3 var(--serif); overflow-wrap: anywhere; }
+.chain-steps .tag { display: inline-block; margin: .35rem 0; }
+.chain-steps p { margin: 0; font-size: .92rem; color: var(--muted); }
 @media (max-width: 40rem) { .counts { grid-template-columns: 1fr 1fr; } .count { border-left: 0; border-top: 1px solid var(--rule); } h1 { font-size: 2rem; } .head { flex-direction: column; } .score { text-align: left; } }
 @media print { body { background: #fff; } main { padding: 0; } details { display: block; } summary { display: none; } }
 </style>
@@ -74,6 +88,30 @@ pre { font: .8rem/1.45 var(--mono); background: #f1efe9; border: 1px solid var(-
   </section>
 </header>
 
+{{if .Run.Chains}}
+<section aria-labelledby="chains">
+<h2 id="chains">Attack chains</h2>
+<p class="note">Confirmed findings that combine: each step becomes possible from somewhere the step before it reaches.</p>
+{{range $i, $chain := .Run.Chains}}
+<article class="chain">
+  <div class="head">
+    <div>
+      <p class="eyebrow">{{len $chain.Steps}} steps</p>
+      <h3>Chain {{inc $i}}</h3>
+    </div>
+    <div class="score"><b>{{$chain.Score}}</b><span>chain score / 100</span></div>
+  </div>
+  <p>{{$chain.Summary}}</p>
+  <ol class="chain-steps">
+    {{range $chain.Steps}}<li><strong>{{if .Title}}{{.Title}}{{else}}{{.FindingID}}{{end}}</strong><span class="tag">{{label .Capability}}</span><p>{{.Why}}</p></li>
+    {{end}}
+  </ol>
+  <p class="note">Data classes reached: {{range $j, $class := $chain.DataClasses}}{{if $j}}, {{end}}{{$class}}{{else}}none{{end}}</p>
+</article>
+{{end}}
+</section>
+{{end}}
+
 <section aria-labelledby="attention">
 <h2 id="attention">Findings that need attention</h2>
 {{if not .Attention}}<p class="note">Nothing was confirmed or left undecided in this run.</p>{{end}}
@@ -85,6 +123,7 @@ pre { font: .8rem/1.45 var(--mono); background: #f1efe9; border: 1px solid var(-
         <span class="tag {{.Finding.Status}}">{{label .Finding.Status}}</span>
         <span class="tag">{{.Finding.Severity}}</span>
         <span class="tag">{{label .Radius.Capability}}</span>
+        <span class="tag kind">{{.Kind}}</span>
       </div>
       <h3>{{.Finding.Title}}</h3>
       <div class="where">{{.Finding.Target}}</div>
@@ -92,6 +131,9 @@ pre { font: .8rem/1.45 var(--mono); background: #f1efe9; border: 1px solid var(-
     <div class="score"><b>{{.Radius.Score}}</b><span>blast radius / 100</span></div>
   </div>
   {{if .Finding.Description}}<p>{{.Finding.Description}}</p>{{end}}
+  {{if .Corroborated}}<div class="related"><strong>Corroborated by</strong>
+    <ul>{{range .Corroborated}}<li>{{.Title}} <span class="where">{{.Target}}</span></li>{{end}}</ul>
+  </div>{{end}}
   <p>{{.Radius.Summary}} <span class="note">Classified from {{.Radius.CapabilityBasis}}.</span></p>
   {{if gt (len .Radius.Reach) 1}}
   <table>
@@ -162,6 +204,47 @@ pre { font: .8rem/1.45 var(--mono); background: #f1efe9; border: 1px solid var(-
 </table>
 {{end}}
 {{else}}<p class="note">No gate audit log was supplied for this run.</p>{{end}}
+{{with .Activity}}{{if .Present}}
+<h3 class="sub">What else the run did</h3>
+{{if .Discovered.Rows}}
+<h4>Hosts discovered</h4>
+<ul class="plain">{{range .Discovered.Rows}}<li>{{.}}</li>{{end}}{{if .Discovered.More}}<li class="note">and {{.Discovered.More}} more</li>{{end}}</ul>
+{{end}}
+{{if .Rejected.Rows}}
+<h4>Hosts rejected because they resolve outside the scope</h4>
+<ul class="plain">{{range .Rejected.Rows}}<li>{{.}}</li>{{end}}{{if .Rejected.More}}<li class="note">and {{.Rejected.More}} more</li>{{end}}</ul>
+{{end}}
+{{if .Crawled}}
+<h4>Crawl</h4>
+<p>{{.Pages}} page(s) crawled, {{.Endpoints}} endpoint(s) found.{{if .Truncated}} <span class="note">Crawling stopped at its limit, so some pages were not visited.</span>{{end}}</p>
+{{end}}
+{{if .Skipped.Rows}}
+<h4>API operations skipped</h4>
+<ul class="plain">{{range .Skipped.Rows}}<li>{{.}}</li>{{end}}{{if .Skipped.More}}<li class="note">and {{.Skipped.More}} more</li>{{end}}</ul>
+{{end}}
+{{if .Packages}}
+<h4>Dependencies</h4>
+<p>{{.Packages}} package(s) inventoried.</p>
+{{end}}
+{{if .Explored}}
+<h4>Autonomous explorer</h4>
+{{if .Steps.Rows}}
+<table>
+  <thead><tr><th>Step</th><th>Tool</th><th>What</th><th>Outcome</th></tr></thead>
+  <tbody>
+  {{range .Steps.Rows}}<tr><td>{{.N}}</td><td>{{label .Tool}}</td><td>{{.Summary}}</td><td>{{.Outcome}}</td></tr>{{end}}
+  </tbody>
+</table>
+{{if .Steps.More}}<p class="note">and {{.Steps.More}} more step(s)</p>{{end}}
+{{end}}
+{{if .Stopped}}<p>Why it stopped: {{.Stopped}}</p>{{end}}
+{{if .Summary}}<p>Its summary: {{.Summary}}</p>{{end}}
+{{end}}
+{{if .Notes.Rows}}
+<h4>Notes</h4>
+<ul class="plain">{{range .Notes.Rows}}<li>{{.}}</li>{{end}}{{if .Notes.More}}<li class="note">and {{.Notes.More}} more</li>{{end}}</ul>
+{{end}}
+{{end}}{{end}}
 </section>
 </main>
 </body>

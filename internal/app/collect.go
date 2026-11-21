@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/url"
+	"strconv"
 	"strings"
 
 	"github.com/dhruv29/vajra/internal/agent"
@@ -299,15 +300,18 @@ func corroborate(findings []finding.Finding) []finding.Finding {
 	return out
 }
 
-// serviceOf names the scheme, host and port a finding belongs to.
+// serviceOf names the scheme, host and port a finding belongs to. The port is
+// always written out, so "https://app.test" and "https://app.test:443" are
+// recognised as the same service.
 func serviceOf(f finding.Finding) string {
 	anchor := f.Target
 	if f.AssetURL != "" {
 		anchor = f.AssetURL
 	}
-	u, err := url.Parse(anchor)
-	if err != nil || u.Host == "" {
+	host, port, err := verify.TargetHostPort(anchor)
+	if err != nil {
 		return ""
 	}
-	return strings.ToLower(u.Scheme + "://" + u.Host)
+	u, _ := url.Parse(anchor)
+	return strings.ToLower(u.Scheme+"://"+host) + ":" + strconv.Itoa(int(port))
 }

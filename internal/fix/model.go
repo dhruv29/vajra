@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/dhruv29/vajra/internal/budget"
 	"github.com/dhruv29/vajra/internal/finding"
@@ -15,9 +16,10 @@ import (
 )
 
 const (
-	proposeTool = "propose_fix"
-	windowLines = 80
-	nonceBytes  = 16
+	proposeTool   = "propose_fix"
+	windowLines   = 80
+	maxLabelBytes = 400
+	nonceBytes    = 16
 )
 
 const systemPrompt = `You fix security weaknesses in source code. You are given one finding from a static analysis tool and the surrounding code with line numbers.
@@ -44,6 +46,10 @@ type ModelProposer struct {
 func (m ModelProposer) Propose(ctx context.Context, f finding.Finding, numbered string) (Proposal, error) {
 	if m.Model == nil || m.Budget == nil {
 		return Proposal{}, errors.New("a model and a budget are required")
+	}
+	lineCount := strings.Count(numbered, "\n")
+	if f.Location == nil || f.Location.Line < 1 || f.Location.Line > lineCount {
+		return Proposal{}, errors.New("the finding does not point at a line in the listing")
 	}
 	if err := m.Budget.SpendTurn(); err != nil {
 		return Proposal{}, err
@@ -94,8 +100,12 @@ func window(numbered string, line int) string {
 
 func oneLine(s string) string {
 	s = strings.Join(strings.Fields(s), " ")
-	if len(s) > 400 {
-		return s[:400] + " [truncated]"
+	if len(s) <= maxLabelBytes {
+		return s
 	}
-	return s
+	cut := maxLabelBytes
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut-- // never cut inside a multi-byte character
+	}
+	return s[:cut] + " [truncated]"
 }

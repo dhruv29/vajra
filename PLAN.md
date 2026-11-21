@@ -115,42 +115,42 @@ The gates and the verification pipeline. Nothing else is safe to build first.
 | Loop | Delivers | State |
 |---|---|---|
 | 4a | SAST: Semgrep in a no-network sandbox, source read and confined by Vajra itself, code-review refuter, starter rules, code findings anchored to their service | done |
-| 4b | Secrets and dependency scanning | next |
-| 5 | SAST and DAST correlation: code findings steer live tests; live results confirm code findings | planned |
-| 6 | Authenticated testing: login flows, session handling, role-based access checks across accounts | planned |
-| 7 | Traffic capture: recording proxy, browser-driven crawling, evidence bound to exact exchanges | planned |
-| 8 | API testing: OpenAPI and GraphQL import, authorisation and business-logic checks | planned |
+| 4b | Built-in secret search with masked values; dependency advisories from OSV (opt-in) | done |
+| 5 | Code and live findings corroborate each other; code findings are given to the explorer as leads to demonstrate live | done |
+| 6 | Test accounts, scanning as an account, access rules checked across every account | done |
+| 7 | Link-following crawler behind the gate | done; a recording proxy and browser-driven crawling are not built |
+| 8 | OpenAPI import; protected operations requested without credentials | done; GraphQL and business-logic checks are not built |
 
 ### Phase 3: autonomy under gates
 
-| Loop | Delivers |
-|---|---|
-| 9 | Planner and workers: goal decomposition, an exploration graph, every action through the same gates |
-| 10 | Recon: sub-domain and service discovery limited to the declared scope; a SOCKS gate for raw TCP tools |
-| 11 | Attack chains: combine confirmed findings into multi-step paths, each step re-proven |
-| 12 | Human-in-the-loop controls: approvals for risky actions, pause, resume, and a full action timeline |
+| Loop | Delivers | State |
+|---|---|---|
+| 9 | Explorer limited to three gated tools, with evidence-bound reports and a step timeline | done |
+| 10 | Sub-domain discovery under wildcard scope; SOCKS5 front end on the gate | done; no port scanner uses the SOCKS5 gate yet |
+| 11 | Attack chains across confirmed findings | done |
+| 12 | Terminal approval for requests that could change data; stop command; timeline in the run | done; pause and resume are not built |
 
 ### Phase 4: beyond the state of the art
 
-| Loop | Delivers |
-|---|---|
-| 13 | Benchmark harness: scheduled runs against deliberately vulnerable apps; published precision and recall |
-| 14 | Fix verification: propose a patch, apply it in a sandbox copy, prove the exploit no longer works |
-| 15 | Continuous mode: run on every commit and deploy; report only what changed since the last run |
-| 16 | Exposure intelligence: match newly published vulnerabilities to the assets and versions already mapped, then test only those |
-| 17 | Cross-model review: a second, different model re-judges high-severity findings; disagreements go to a person |
-| 18 | Team features: roles, audit trail, ticketing and chat integrations, signed reports |
-| 19 | Hardened distribution: reproducible builds, signed images, software bill of materials |
+| Loop | Delivers | State |
+|---|---|---|
+| 13 | Scoring against an answer key; a key for the lab | done; scheduled runs against public vulnerable apps and published numbers are not |
+| 14 | Patch proposal, applied to a copy and re-checked with the rule | done for code findings |
+| 15 | Baseline comparison, fail only on new findings, example pipeline | done |
+| 16 | New advisories matched to a run's recorded dependencies | done for dependencies; service versions are not matched |
+| 17 | A second model must also hold serious findings | done within one provider |
+| 18 | Signed reports, webhook summaries | done; user accounts, roles and ticketing are not built |
+| 19 | Reproducible build, zero third-party modules, base images pinned by digest, SBOM, CI | done; images are not signed |
 
-## Decisions taken
+## Not yet proven
 
-- Fresh codebase with no code taken from other projects.
-- Go, standard library first, single binary with the UI embedded.
-- UI is plain HTML, CSS and JavaScript modules served from the binary: no
-  build step and no third-party scripts, so a strict content-security policy
-  is possible.
-- JSON configuration (no YAML dependency).
-- Licensed under AGPL-3.0.
+Everything marked done is unit-tested. `scripts/e2e.sh` additionally runs the
+gate, live scanning, code analysis, access checks, API tests and the secret
+search against lab targets. These have run only against a stand-in for the
+model API, never the real one: the reviewer, the second reviewer, the
+explorer and the patch proposer. Discovery, crawling, dependency lookups and
+the SOCKS5 gate have unit tests only. Blast-radius rules and scores are
+uncalibrated heuristics.
 
 ## Hardening from review
 
@@ -169,16 +169,15 @@ tested:
 - Sandbox mounts are read-only unless stated; user IDs are parsed, not matched.
 - One oversized scanner record no longer discards a whole scan.
 
-Still open from that review: wildcards over public suffixes such as `*.co.uk`
-are accepted, leftover containers are labelled but not yet reaped, and scanner
-images are not pinned by digest.
+Since then: leftover containers can be removed with `vajra cleanup`, and base
+images are pinned by digest. Still open from that review: wildcards over
+public suffixes such as `*.co.uk` are accepted.
 
 ## Open questions
 
-- Raw TCP tools (port scanning) need a SOCKS or transparent gate; the first
-  proxy speaks HTTP and CONNECT only.
-- Which model backs the refuter by default, and whether a second, different
-  model should cross-check high-severity findings.
+- Which raw TCP tools to run behind the SOCKS5 gate, and how to verify what
+  they report.
+- Whether the second reviewer should come from a different provider.
 - Multi-user access and roles for team use.
 
 ## Authorised use

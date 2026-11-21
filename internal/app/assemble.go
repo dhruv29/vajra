@@ -152,7 +152,9 @@ func (r *run) refuteStage() (verify.RefuteStage, error) {
 		if err != nil {
 			return verify.RefuteStage{}, err
 		}
-		reviewer = refute.Panel{Primary: reviewer, Second: second, MinSeverity: finding.ParseSeverity(cfg.SecondMinSeverity)}
+		reviewer = refute.Panel{
+			Primary: reviewer, Second: second, MinSeverity: finding.ParseSeverity(cfg.SecondMinSeverity), Budget: r.budget,
+		}
 	}
 	agentModel := ""
 	if r.cfg.Agent != nil {

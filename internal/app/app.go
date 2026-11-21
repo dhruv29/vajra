@@ -193,20 +193,29 @@ func ServeGate(ctx context.Context, policy *scope.Policy, listener, socks net.Li
 	if err != nil {
 		return err
 	}
+	// Everything that can fail is built before anything starts serving, so an
+	// error here leaves nothing running.
+	var socksServer *egress.SOCKS5
+	if socks != nil {
+		if socksServer, err = egress.NewSOCKS5(guard, sink); err != nil {
+			return err
+		}
+	}
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	stopped := make(chan error, 2)
 	server := &http.Server{Handler: proxy, ReadHeaderTimeout: gateReadHeaderTimeout, IdleTimeout: gateIdleTimeout}
 	go func() { stopped <- server.Serve(listener) }()
-	if socks != nil {
-		socksServer, err := egress.NewSOCKS5(guard, sink)
-		if err != nil {
-			return err
-		}
+	if socksServer != nil {
 		go func() { stopped <- socksServer.Serve(ctx, socks) }()
 	}
 	select {
 	case err := <-stopped:
+		if ctx.Err() != nil {
+			// A front end returning because the gate is being stopped is the
+			// normal shutdown, whichever signal was noticed first.
+			return shutdown(server)
+		}
 		// One front end stopping takes the gate down: a half-working gate
 		// would fail in confusing ways.
 		cancel()
@@ -216,13 +225,17 @@ func ServeGate(ctx context.Context, policy *scope.Policy, listener, socks net.Li
 		}
 		return err
 	case <-ctx.Done():
-		shutdownCtx, stop := context.WithTimeout(context.Background(), gateShutdownTimeout)
-		defer stop()
-		if err := server.Shutdown(shutdownCtx); err != nil {
-			return server.Close()
-		}
-		return nil
+		return shutdown(server)
 	}
+}
+
+func shutdown(server *http.Server) error {
+	shutdownCtx, stop := context.WithTimeout(context.Background(), gateShutdownTimeout)
+	defer stop()
+	if err := server.Shutdown(shutdownCtx); err != nil {
+		return server.Close()
+	}
+	return nil
 }
 
 // Record turns a report into a stored run: it derives the asset graph and the

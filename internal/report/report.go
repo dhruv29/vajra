@@ -23,6 +23,9 @@ const (
 	maxEvidenceChars = 4000
 	minFenceLength   = 3
 	truncationNote   = "\n[truncated in this report; the full text is in the run record]"
+	// maxListRows caps every list and table built from a run's activity, so
+	// a run that discovered thousands of things still gives a readable report.
+	maxListRows = 50
 )
 
 //go:embed report.html.tmpl
@@ -30,6 +33,7 @@ var htmlSource string
 
 var htmlTemplate = template.Must(template.New("report").Funcs(template.FuncMap{
 	"label":   label,
+	"inc":     func(i int) int { return i + 1 },
 	"seconds": func(d time.Duration) string { return fmt.Sprintf("%.0fs", d.Seconds()) },
 }).Parse(htmlSource))
 
@@ -40,6 +44,16 @@ type item struct {
 	Request  string
 	Response string
 	Code     string
+	// Kind says in plain words how the finding was found.
+	Kind string
+	// Corroborated are the findings named in CorroboratedBy that the run holds.
+	Corroborated []related
+}
+
+// related names another finding of the same run.
+type related struct {
+	Title  string
+	Target string
 }
 
 // view is what the templates render.
@@ -48,6 +62,7 @@ type view struct {
 	Counts    []count
 	Attention []item // confirmed and unconfirmed, highest blast radius first
 	Dismissed []item // refuted and out of scope
+	Activity  activity
 }
 
 type count struct {
@@ -58,7 +73,13 @@ type count struct {
 var statusOrder = []finding.Status{finding.Confirmed, finding.Unconfirmed, finding.Refuted, finding.OutOfScope}
 
 func newView(run record.Run) view {
-	v := view{Run: run}
+	v := view{Run: run, Activity: newActivity(run.Report.Activity)}
+	byID := map[string]finding.Finding{}
+	for _, f := range run.Report.Findings {
+		if _, exists := byID[f.ID]; !exists {
+			byID[f.ID] = f
+		}
+	}
 	for _, status := range statusOrder {
 		v.Counts = append(v.Counts, count{Status: status, N: run.Report.Summary[status]})
 	}
@@ -67,6 +88,7 @@ func newView(run record.Run) view {
 		it := item{
 			Finding: f, Radius: radius,
 			Request: clip(f.Evidence.Request), Response: clip(f.Evidence.Response), Code: clip(f.Evidence.Code),
+			Kind: kindLabel(f.Kind), Corroborated: corroborating(f, byID),
 		}
 		if f.Status == finding.Confirmed || f.Status == finding.Unconfirmed {
 			v.Attention = append(v.Attention, it)
@@ -83,6 +105,39 @@ func clip(s string) string {
 		return s
 	}
 	return s[:maxEvidenceChars] + truncationNote
+}
+
+// kindLabel says how a finding was found. Findings recorded before kinds
+// existed all came from testing a running application.
+func kindLabel(k finding.Kind) string {
+	switch k {
+	case finding.Dynamic, "":
+		return "live test"
+	case finding.Static:
+		return "code analysis"
+	case finding.Dependency:
+		return "dependency"
+	default:
+		return label(k)
+	}
+}
+
+// corroborating looks up the findings f names in CorroboratedBy. An ID the
+// run does not hold is skipped: there is nothing to show for it.
+func corroborating(f finding.Finding, byID map[string]finding.Finding) []related {
+	var out []related
+	for _, id := range f.CorroboratedBy {
+		other, ok := byID[id]
+		if !ok {
+			continue
+		}
+		title := other.Title
+		if title == "" {
+			title = other.RuleID
+		}
+		out = append(out, related{Title: title, Target: other.Target})
+	}
+	return out
 }
 
 // label turns an identifier such as "out_of_scope" into "out of scope".
@@ -148,6 +203,8 @@ func Markdown(run record.Run) string {
 	}
 	b.WriteString("\n")
 
+	writeChains(&b, run.Chains)
+
 	b.WriteString("## Findings that need attention\n\n")
 	if len(v.Attention) == 0 {
 		b.WriteString("None.\n\n")
@@ -172,11 +229,49 @@ func Markdown(run record.Run) string {
 	return b.String()
 }
 
+// writeChains lists the multi-step paths. The section is left out when the
+// run found none.
+func writeChains(b *strings.Builder, chains []blast.Chain) {
+	if len(chains) == 0 {
+		return
+	}
+	b.WriteString("## Attack chains\n\n")
+	b.WriteString("Confirmed findings that combine: each step becomes possible from somewhere the step before it reaches.\n\n")
+	for i, c := range chains {
+		fmt.Fprintf(b, "### Chain %d: score %d / 100\n\n%s\n\n", i+1, c.Score, md(c.Summary))
+		b.WriteString("| Step | Finding | Capability | Why |\n|---|---|---|---|\n")
+		for n, step := range c.Steps {
+			fmt.Fprintf(b, "| %d | %s | %s | %s |\n", n+1, md(stepTitle(step)), md(label(step.Capability)), md(step.Why))
+		}
+		classes := make([]string, 0, len(c.DataClasses))
+		for _, class := range c.DataClasses {
+			classes = append(classes, md(class))
+		}
+		fmt.Fprintf(b, "\n**Data classes reached:** %s\n\n", orNone(strings.Join(classes, ", ")))
+	}
+}
+
+// stepTitle names a chain step, falling back to the finding's ID.
+func stepTitle(s blast.Step) string {
+	if strings.TrimSpace(s.Title) == "" {
+		return s.FindingID
+	}
+	return s.Title
+}
+
 func writeFinding(b *strings.Builder, n int, it item) {
 	f, radius := it.Finding, it.Radius
 	fmt.Fprintf(b, "### %d. %s\n\n", n, md(f.Title))
-	fmt.Fprintf(b, "- **Status:** %s\n- **Severity:** %s\n- **Blast radius score:** %d / 100\n- **Where:** %s\n- **Rule:** %s (%s)\n\n",
-		label(f.Status), f.Severity, radius.Score, md(f.Target), md(f.RuleID), md(f.Source))
+	fmt.Fprintf(b, "- **Status:** %s\n- **Severity:** %s\n- **Found by:** %s\n- **Blast radius score:** %d / 100\n- **Where:** %s\n- **Rule:** %s (%s)\n",
+		label(f.Status), f.Severity, md(it.Kind), radius.Score, md(f.Target), md(f.RuleID), md(f.Source))
+	if len(it.Corroborated) > 0 {
+		names := make([]string, 0, len(it.Corroborated))
+		for _, other := range it.Corroborated {
+			names = append(names, fmt.Sprintf("%s (%s)", md(other.Title), md(other.Target)))
+		}
+		fmt.Fprintf(b, "- **Corroborated by:** %s\n", strings.Join(names, "; "))
+	}
+	b.WriteString("\n")
 	if f.Description != "" {
 		fmt.Fprintf(b, "%s\n\n", md(f.Description))
 	}
@@ -234,8 +329,13 @@ func writeAppendix(b *strings.Builder, run record.Run) {
 		u.Tokens, l.Tokens, u.Turns, l.Turns, u.SandboxRuns, l.SandboxRuns, int(u.Elapsed.Seconds()), l.DurationSeconds)
 
 	b.WriteString("### What the run touched\n\n")
+	writeReach(b, run)
+	writeActivity(b, newActivity(r.Activity))
+}
+
+func writeReach(b *strings.Builder, run record.Run) {
 	if run.Reach == nil {
-		b.WriteString("No gate audit log was supplied for this run.\n")
+		b.WriteString("No gate audit log was supplied for this run.\n\n")
 		return
 	}
 	fmt.Fprintf(b, "%d connection(s) allowed, %d refused.\n\n", run.Reach.AllowedTotal, run.Reach.DeniedTotal)
@@ -249,6 +349,7 @@ func writeAppendix(b *strings.Builder, run record.Run) {
 	for _, t := range run.Reach.Denied {
 		fmt.Fprintf(b, "| %s | refused | %d | %s |\n", md(t.Target), t.Count, md(t.Reason))
 	}
+	b.WriteString("\n")
 }
 
 func orNone(s string) string {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"regexp"
 	"strings"
 	"testing"
@@ -227,7 +228,7 @@ func TestOnlyTheCodeAroundTheFindingIsSentAndLineNumbersStayCorrect(t *testing.T
 		t.Run(name, func(t *testing.T) {
 			source := make([]string, tc.fileLines)
 			for i := range source {
-				source[i] = "code " + strings.TrimSpace(strings.Split(numbered(make([]string, i+1)), "\n")[i][:5])
+				source[i] = fmt.Sprintf("code %d", i+1)
 			}
 			model := &fakeModel{reply: proposes(1, 1, "x", "y")}
 			proposer := ModelProposer{Model: model, Budget: newBudget(t, roomy)}
@@ -300,7 +301,6 @@ func TestLongLabelsAreTruncated(t *testing.T) {
 }
 
 func TestLongLabelsAreCutOnACharacterBoundary(t *testing.T) {
-	t.Skip("BUG: oneLine (model.go:97-98) cuts at byte 400 even inside a multi-byte character, so the prompt is not valid UTF-8")
 	model := &fakeModel{reply: proposes(1, 1, "x", "y")}
 	proposer := ModelProposer{Model: model, Budget: newBudget(t, roomy)}
 	f := codeFinding(testFile, 1)
@@ -488,8 +488,6 @@ func TestProposeRequiresAModelAndABudget(t *testing.T) {
 }
 
 func TestProposeRefusesAFindingItCannotPlaceInTheListing(t *testing.T) {
-	t.Skip("BUG: Propose (model.go:59) dereferences a nil Location, and window (model.go:91-92) slices out of range for a " +
-		"line far outside the listing; both panic instead of returning an error (Attempt guards these, a direct caller is not)")
 	at := func(line int) finding.Finding { return codeFinding(testFile, line) }
 	unlocated := codeFinding(testFile, 1)
 	unlocated.Location = nil

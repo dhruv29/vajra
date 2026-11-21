@@ -16,6 +16,7 @@ import (
 
 	"github.com/dhruv29/vajra/internal/budget"
 	"github.com/dhruv29/vajra/internal/finding"
+	"github.com/dhruv29/vajra/internal/refute"
 	"github.com/dhruv29/vajra/internal/scope"
 	"github.com/dhruv29/vajra/internal/topology"
 	"github.com/dhruv29/vajra/internal/verify"
@@ -337,10 +338,12 @@ func (c Config) validate() (*scope.Policy, error) {
 
 // validateLive checks what every network-facing run needs.
 func (c Config) validateLive(policy *scope.Policy) error {
+	// Crawling and exploring start from the targets (or from hosts that
+	// discovery adds to them). With neither there is nowhere to begin.
+	if len(c.Targets) == 0 && c.Recon == nil && (c.Crawl != nil || c.Agent != nil) {
+		return errors.New("config: crawl and agent need targets")
+	}
 	if !c.IsLive() {
-		if c.Crawl != nil || c.Agent != nil {
-			return errors.New("config: crawl and agent need targets")
-		}
 		return nil
 	}
 	if err := checkInScope(policy, "target", c.Targets...); err != nil {
@@ -384,7 +387,25 @@ func (c Config) validateAuth(policy *scope.Policy) error {
 	if c.Auth.ScanAs != "" && !names[c.Auth.ScanAs] {
 		return fmt.Errorf("config: auth.scan_as %q is not a configured identity", c.Auth.ScanAs)
 	}
+	names["anonymous"] = true
+	checkNames := map[string]bool{}
 	for _, check := range c.Auth.AccessChecks {
+		if strings.TrimSpace(check.Name) == "" || checkNames[check.Name] {
+			return fmt.Errorf("config: access check name %q is empty or repeated", check.Name)
+		}
+		checkNames[check.Name] = true
+		// A check is repeated as every account, so only methods that do not
+		// change data are allowed.
+		switch strings.ToUpper(check.Method) {
+		case "", "GET", "HEAD", "OPTIONS":
+		default:
+			return fmt.Errorf("config: access check %q uses %s; only GET, HEAD and OPTIONS are tested", check.Name, check.Method)
+		}
+		for _, allowed := range check.Allow {
+			if !names[allowed] {
+				return fmt.Errorf("config: access check %q allows unknown identity %q", check.Name, allowed)
+			}
+		}
 		if err := checkInScope(policy, "access check "+check.Name, check.URL); err != nil {
 			return err
 		}
@@ -438,17 +459,22 @@ func (c Config) validateRefuter(*scope.Policy) error {
 	if c.Refuter.Provider != RefuterAnthropic && c.Refuter.Provider != RefuterNone {
 		return fmt.Errorf("config: refuter.provider %q is not supported", c.Refuter.Provider)
 	}
+	if finding.ParseSeverity(c.Refuter.SecondMinSeverity) == finding.SeverityUnknown {
+		return fmt.Errorf("config: refuter.second_min_severity %q is not a severity", c.Refuter.SecondMinSeverity)
+	}
 	if c.Refuter.SecondModel == "" {
 		return nil
 	}
 	if c.Refuter.Provider != RefuterAnthropic {
 		return errors.New("config: refuter.second_model needs refuter.provider \"anthropic\"")
 	}
-	if c.Refuter.SecondModel == c.Refuter.Model {
-		return errors.New("config: refuter.second_model must differ from refuter.model, or it adds nothing")
+	// An unset model means the default, so compare with what will really run.
+	first := c.Refuter.Model
+	if first == "" {
+		first = refute.DefaultModel
 	}
-	if finding.ParseSeverity(c.Refuter.SecondMinSeverity) == finding.SeverityUnknown {
-		return fmt.Errorf("config: refuter.second_min_severity %q is not a severity", c.Refuter.SecondMinSeverity)
+	if c.Refuter.SecondModel == first {
+		return errors.New("config: refuter.second_model must differ from refuter.model, or it adds nothing")
 	}
 	return nil
 }

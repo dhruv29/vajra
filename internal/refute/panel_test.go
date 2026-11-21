@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/dhruv29/vajra/internal/budget"
 	"github.com/dhruv29/vajra/internal/finding"
 	"github.com/dhruv29/vajra/internal/verify"
 )
@@ -63,5 +64,25 @@ func TestPanelPassesOnThePrimaryReviewersError(t *testing.T) {
 
 	if _, err := panel.Refute(context.Background(), finding.Finding{Severity: finding.SeverityCritical}); err == nil || second.calls != 0 {
 		t.Fatalf("err = %v, second asked %d times", err, second.calls)
+	}
+}
+
+func TestPanelChargesATurnForTheSecondOpinionAndStopsWhenThereIsNone(t *testing.T) {
+	b, err := budget.New(budget.Limits{Tokens: 1 << 20, Turns: 1, SandboxRuns: 1, DurationSeconds: 60}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second := &fixedRefuter{verdict: verify.Holds}
+	panel := Panel{Primary: &fixedRefuter{verdict: verify.Holds}, Second: second, MinSeverity: finding.SeverityHigh, Budget: b}
+	serious := finding.Finding{Severity: finding.SeverityHigh}
+
+	first, _ := panel.Refute(context.Background(), serious)
+	again, _ := panel.Refute(context.Background(), serious)
+
+	if first.Verdict != verify.Holds || b.Usage().Turns != 1 || second.calls != 1 {
+		t.Fatalf("first = %+v, turns = %d, second asked %d times", first, b.Usage().Turns, second.calls)
+	}
+	if again.Verdict != verify.Uncertain || !strings.Contains(again.Reason, "no budget left") {
+		t.Fatalf("with the turns spent: %+v; a finding must not be confirmed on one reviewer when two are required", again)
 	}
 }

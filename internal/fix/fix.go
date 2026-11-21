@@ -88,7 +88,7 @@ func Attempt(ctx context.Context, sourceRoot string, f finding.Finding, proposer
 		result.Reason = "the proposed change leaves the file as it was"
 		return result, nil
 	}
-	result.Patch = unifiedDiff(rel, lines, patched, proposal)
+	result.Patch = unifiedDiff(rel, lines, patched, proposal, hadTrailingNewline(original))
 
 	remaining, err := rescanCopy(ctx, rel, patched, hadTrailingNewline(original), rescan)
 	if err != nil {
@@ -192,11 +192,21 @@ func rescanCopy(ctx context.Context, rel string, patched []string, trailingNewli
 		return nil, fmt.Errorf("fix: %w", err)
 	}
 	content := strings.Join(patched, "\n")
-	if trailingNewline {
+	if trailingNewline && content != "" {
 		content += "\n"
 	}
 	if err := os.WriteFile(target, []byte(content), fileMode); err != nil {
 		return nil, fmt.Errorf("fix: %w", err)
+	}
+	// Modes are set explicitly: a restrictive umask would otherwise leave the
+	// copy unreadable to the scanner.
+	if err := os.Chmod(target, fileMode); err != nil {
+		return nil, fmt.Errorf("fix: %w", err)
+	}
+	for dir := filepath.Dir(target); dir != tmp && strings.HasPrefix(dir, tmp); dir = filepath.Dir(dir) {
+		if err := os.Chmod(dir, dirMode); err != nil {
+			return nil, fmt.Errorf("fix: %w", err)
+		}
 	}
 	resolved, err := filepath.EvalSymlinks(tmp)
 	if err != nil {
@@ -209,26 +219,39 @@ func rescanCopy(ctx context.Context, rel string, patched []string, trailingNewli
 	return findings, nil
 }
 
+// noNewlineMarker is what a unified diff writes after a last line that has no
+// newline; without it the patch does not apply to such a file.
+const noNewlineMarker = "\\ No newline at end of file\n"
+
 // unifiedDiff renders the one changed range as a unified diff hunk.
-func unifiedDiff(rel string, before, after []string, p Proposal) string {
+func unifiedDiff(rel string, before, after []string, p Proposal, trailingNewline bool) string {
 	removed := before[p.StartLine-1 : p.EndLine]
 	added := after[p.StartLine-1 : p.StartLine-1+len(after)-len(before)+len(removed)]
 	from := max(1, p.StartLine-diffContext)
 	to := min(len(before), p.EndLine+diffContext)
+	// mark follows a line that is the last of its file when that file does
+	// not end in a newline.
+	mark := func(isLastLine bool) string {
+		if isLastLine && !trailingNewline {
+			return noNewlineMarker
+		}
+		return ""
+	}
+	changesLastLine := p.EndLine == len(before)
 	var b strings.Builder
 	fmt.Fprintf(&b, "--- a/%s\n+++ b/%s\n", rel, rel)
 	fmt.Fprintf(&b, "@@ -%d,%d +%d,%d @@\n", from, to-from+1, from, to-from+1+len(added)-len(removed))
 	for _, line := range before[from-1 : p.StartLine-1] {
 		b.WriteString(" " + line + "\n")
 	}
-	for _, line := range removed {
-		b.WriteString("-" + line + "\n")
+	for i, line := range removed {
+		b.WriteString("-" + line + "\n" + mark(changesLastLine && i == len(removed)-1))
 	}
-	for _, line := range added {
-		b.WriteString("+" + line + "\n")
+	for i, line := range added {
+		b.WriteString("+" + line + "\n" + mark(changesLastLine && i == len(added)-1))
 	}
-	for _, line := range before[p.EndLine:to] {
-		b.WriteString(" " + line + "\n")
+	for i, line := range before[p.EndLine:to] {
+		b.WriteString(" " + line + "\n" + mark(p.EndLine+i+1 == len(before)))
 	}
 	return b.String()
 }

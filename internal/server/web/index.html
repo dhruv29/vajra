@@ -37,6 +37,14 @@
         <h1 id="overview-heading"></h1>
         <dl id="overview-meta" class="meta"></dl>
         <div id="counts" class="counts" role="group" aria-label="Filter findings by status"></div>
+        <div id="kinds" class="kinds" role="group" aria-label="Filter findings by how they were found"></div>
+      </section>
+
+      <section id="chains" class="chains" aria-labelledby="chains-heading" hidden>
+        <h2 id="chains-heading">Attack chains</h2>
+        <p class="basis">Confirmed findings that combine: each step becomes possible from somewhere the step before it reaches. Select a step to see that finding.</p>
+        <ol id="chains-body" class="chain-list"></ol>
+        <div id="chains-more"></div>
       </section>
 
       <div class="workbench" id="workbench" hidden>
@@ -45,7 +53,7 @@
           <ol id="findings" class="findings"></ol>
         </section>
 
-        <section class="detail" id="detail" aria-live="polite" aria-labelledby="detail-heading">
+        <section class="detail" id="detail" tabindex="-1" aria-live="polite" aria-labelledby="detail-heading">
           <h2 id="detail-heading" class="visually-hidden">Finding detail</h2>
           <div id="detail-body"></div>
         </section>
@@ -54,6 +62,11 @@
       <section id="reach" class="reach" aria-labelledby="reach-heading" hidden>
         <h2 id="reach-heading">What this run touched</h2>
         <div id="reach-body"></div>
+      </section>
+
+      <section id="activity" class="activity" aria-labelledby="activity-heading" hidden>
+        <h2 id="activity-heading">Activity</h2>
+        <div id="activity-body"></div>
       </section>
     </main>
   </div>

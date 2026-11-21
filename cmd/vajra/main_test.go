@@ -24,6 +24,8 @@ const validConfig = `{
   "nuclei": {"image": "vajra-nuclei:local", "templates_dir": "/opt/nuclei-templates", "timeout_seconds": 900}
 }`
 
+const unreachableURL = "http://127.0.0.1:1"
+
 // idleRunner stands in for Docker: no test here reaches a real scan.
 type idleRunner struct{}
 
@@ -37,6 +39,10 @@ func TestMain(m *testing.M) {
 			Runner:       idleRunner{},
 			CheckNetwork: func(context.Context, string) error { return nil },
 			Getenv:       func(string) string { return "" },
+			// Nothing listens here, so a test that forgets to stub a remote
+			// service fails instead of reaching the real one.
+			ModelBaseURL: unreachableURL,
+			OSVBaseURL:   unreachableURL,
 		}
 	}
 	os.Exit(m.Run())

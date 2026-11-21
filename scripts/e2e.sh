@@ -9,7 +9,12 @@
 #   4. the gate wrote an audit log,
 #   5. the saved run renders as reports with a blast radius,
 #   6. a result that no longer reproduces is refuted only if the target answers,
-#   7. code analysis finds a planted injection and ignores the safe variant.
+#   7. code analysis finds a planted injection and ignores the safe variant,
+#   8. access checks, API tests and the secret search find planted flaws, and
+#      no credential or full secret reaches a report.
+#
+# Set E2E_REFUTER=anthropic (with ANTHROPIC_API_KEY) to also have a live model
+# review the findings and to score the result against bench/lab.json.
 #
 # Set E2E_KEEP=/some/dir to keep the generated reports.
 #
@@ -193,5 +198,107 @@ grep -q '"reason": "source located and read"' "$WORK/code-report.json" || fail "
 grep -q 'return db.execute(query)' "$WORK/code-report.json" || fail "the code around the finding is missing from the evidence"
 pass "code analysis found the injection at line 7, left the safe query alone, and captured the code as evidence"
 if [ -n "${E2E_KEEP:-}" ]; then cp "$WORK/code-report.json" "$E2E_KEEP/"; fi
+
+echo "== access control, API, crawl and secrets on a second lab app"
+docker stop "$TARGET" >/dev/null 2>&1 || true
+docker rm -f "$TARGET" >/dev/null 2>&1 || true
+mkdir -p "$WORK/app"
+cat > "$WORK/app/index.html" <<'HTMLEOF'
+<h1>lab shop</h1>
+<a href="/about.html">About</a> <a href="/account">Account</a>
+<a href="https://example.com/elsewhere">Partner</a>
+<form action="/search" method="get"><input name="q"></form>
+HTMLEOF
+echo '<h1>about</h1><a href="/">home</a>' > "$WORK/app/about.html"
+echo '<h1>user list: alice, bob</h1>' > "$WORK/app/admin-users.html"
+echo '<h1>your account</h1>' > "$WORK/app/account.html"
+echo '<h1>sign in</h1>' > "$WORK/app/login.html"
+cat > "$WORK/nginx.conf" <<'NGINXEOF'
+server {
+  listen 80;
+  root /usr/share/nginx/html;
+  # Broken on purpose: an ordinary user is served the administration page.
+  location = /admin/users {
+    if ($http_authorization !~ "^Bearer (lab-admin-token|lab-user-token)$") { return 403; }
+    try_files /admin-users.html =404;
+  }
+  location = /account {
+    if ($http_authorization !~ "^Bearer (lab-admin-token|lab-user-token)$") { return 302 /login.html; }
+    try_files /account.html =404;
+  }
+  # Broken on purpose: the description says this needs authentication.
+  location = /api/orders { default_type application/json; return 200 '{"orders":[{"id":1,"total":42}]}'; }
+  location = /api/health { default_type application/json; return 200 '{"ok":true}'; }
+}
+NGINXEOF
+chmod -R a+rX "$WORK/app" "$WORK/nginx.conf"
+docker run -d --name "$TARGET" --network "$LAB_NET" --network-alias target \
+  -v "$WORK/app:/usr/share/nginx/html:ro" -v "$WORK/nginx.conf:/etc/nginx/conf.d/default.conf:ro" nginx:alpine >/dev/null
+cat > "$WORK/openapi.json" <<'APIEOF'
+{
+  "openapi": "3.0.3",
+  "info": {"title": "Lab shop", "version": "1"},
+  "security": [{"bearer": []}],
+  "components": {"securitySchemes": {"bearer": {"type": "http", "scheme": "bearer"}}},
+  "paths": {
+    "/api/orders": {
+      "get": {"operationId": "listOrders", "responses": {"200": {"description": "ok"}}},
+      "post": {"operationId": "createOrder", "responses": {"201": {"description": "created"}}}
+    },
+    "/api/health": {"get": {"operationId": "health", "security": [], "responses": {"200": {"description": "ok"}}}}
+  }
+}
+APIEOF
+# A credential-shaped value for the secret search to find. It is assembled
+# here so that this script does not itself contain one.
+fake_key="AKIA""QWERTYUIOPASDFGH"
+mkdir -p "$WORK/src2"
+printf 'AWS_ACCESS_KEY_ID = "%s"\nREGION = "eu-west-1"\n' "$fake_key" > "$WORK/src2/settings.py"
+chmod -R a+rX "$WORK/src2"
+cat > "$WORK/full.json" <<EOF
+{
+  "authorization": {"operator": "e2e", "statement": "Local lab target created by scripts/e2e.sh"},
+  "scope": {"hosts": ["target"], "cidrs": ["$LAB_SUBNET"], "ports": [80]},
+  "budget": {"tokens": 200000, "turns": 40, "sandbox_runs": 60, "duration_seconds": 1200},
+  "sandbox": {"network": "$TASK_NET", "proxy_url": "http://gate:3128"},
+  "probe": {"image": "vajra:local", "timeout_seconds": 120},
+  "auth": {
+    "identities": [
+      {"name": "admin", "headers_env": {"Authorization": "VAJRA_E2E_ADMIN"}},
+      {"name": "user", "headers_env": {"Authorization": "VAJRA_E2E_USER"}}
+    ],
+    "access_checks": [
+      {"name": "User administration", "url": "http://target/admin/users", "allow": ["admin"]},
+      {"name": "Account page", "url": "http://target/account", "allow": ["admin", "user"]}
+    ]
+  },
+  "api": {"spec": "$WORK/openapi.json", "base_url": "http://target"},
+  "source": {"root": "$WORK/src2", "secrets": true},
+  "refuter": {"provider": "${E2E_REFUTER:-none}"}
+}
+EOF
+VAJRA_E2E_ADMIN="Bearer lab-admin-token" VAJRA_E2E_USER="Bearer lab-user-token" \
+  "$WORK/vajra" scan -config "$WORK/full.json" -out "$WORK/full-report.json" -data "$WORK/data" -gate-audit "$WORK/audit/audit.jsonl"
+full="$WORK/full-report.json"
+grep -q '"rule_id": "unauthorized-access"' "$full" || fail "the user reaching the admin page was not reported: $(cat "$full")"
+grep -q 'User administration is served to the account' "$full" || fail "the access finding does not name the rule that was broken"
+grep -q '"rule_id": "unauthenticated-access"' "$full" && fail "the account page redirects anonymous visitors, so it must not be reported"
+grep -q '"rule_id": "auth-not-enforced"' "$full" || fail "the unprotected API operation was not reported"
+grep -q 'createOrder' "$full" || fail "the skipped state-changing API operation is not listed"
+grep -q '"rule_id": "aws-access-key-id"' "$full" || fail "the hard-coded key was not reported"
+grep -q "$fake_key" "$full" && fail "the full secret value is in the report"
+grep -q 'lab-user-token\|lab-admin-token' "$full" && fail "a test account's credential is in the report"
+grep -q 'lab-user-token\|lab-admin-token' "$WORK"/data/runs/*.json && fail "a test account's credential is in a saved run"
+pass "an ordinary user reaching the admin page, an unprotected API operation and a hard-coded key were all found"
+pass "no credential and no full secret appears in the report or the saved runs"
+if [ -n "${E2E_KEEP:-}" ]; then cp "$full" "$E2E_KEEP/"; fi
+
+if [ "${E2E_REFUTER:-none}" = "anthropic" ]; then
+  echo "== accuracy against the answer key (with a live reviewer)"
+  run_id="$("$WORK/vajra" runs -data "$WORK/data" | awk 'NR==2 {print $1}')"
+  "$WORK/vajra" bench -data "$WORK/data" -run "$run_id" -key bench/lab.json -min-precision 1 -min-recall 1 \
+    || fail "the lab benchmark did not reach full precision and recall"
+  pass "every planted flaw was confirmed and nothing else was"
+fi
 
 echo "ALL CHECKS PASSED"

@@ -25,6 +25,7 @@ import (
 	"net/http"
 	"regexp"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/dhruv29/vajra/internal/budget"
 	"github.com/dhruv29/vajra/internal/finding"
@@ -194,6 +195,7 @@ func (e *Explorer) Explore(ctx context.Context) (Result, error) {
 			System: systemPrompt, Messages: messages, Tools: tools, ToolChoice: &llm.ToolChoice{Type: "any"},
 		})
 		if err != nil {
+			result.Stopped = "the model call failed"
 			return e.finish(result), fmt.Errorf("agent: %w", err)
 		}
 		e.opts.Budget.AddTokens(resp.Tokens())
@@ -491,6 +493,9 @@ func oneLine(s string) string { return strings.Join(strings.Fields(s), " ") }
 func clip(s string, limit int) string {
 	if len(s) <= limit {
 		return s
+	}
+	for limit > 0 && !utf8.RuneStart(s[limit]) {
+		limit-- // never cut inside a multi-byte character
 	}
 	return s[:limit] + " [truncated]"
 }

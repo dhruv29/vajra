@@ -8,6 +8,8 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
+	"strings"
 
 	"github.com/dhruv29/vajra/internal/finding"
 	"github.com/dhruv29/vajra/internal/openapi"
@@ -39,8 +41,11 @@ func New(fetcher probe.Fetcher, doc openapi.Document, baseURL string, params map
 	if fetcher == nil {
 		return nil, errors.New("apitest: a fetcher is required")
 	}
-	if baseURL == "" {
-		return nil, errors.New("apitest: a base URL is required")
+	// A base URL that is not http(s) would make every operation unbuildable,
+	// and "nothing could be tested" must not read as "nothing was found".
+	baseURL = strings.TrimSpace(baseURL)
+	if u, err := url.Parse(baseURL); err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+		return nil, fmt.Errorf("apitest: base URL %q must be an http(s) URL", baseURL)
 	}
 	return &Tester{
 		fetcher: fetcher, doc: doc, byFinding: map[string]probe.Request{},
@@ -61,7 +66,9 @@ func (t *Tester) Run(ctx context.Context) ([]finding.Finding, error) {
 	}
 	var batch []probe.Request
 	for _, r := range requests {
-		if _, ok := protected[r.ID]; ok {
+		// OPTIONS is left out: servers answer preflight requests without
+		// credentials by design, which says nothing about the operation.
+		if _, ok := protected[r.ID]; ok && r.Method != http.MethodOptions {
 			batch = append(batch, r)
 		}
 	}

@@ -6,3 +6,6 @@ report*.json
 run.local.json
 .env
 .DS_Store
+/first
+/second
+sbom.json
