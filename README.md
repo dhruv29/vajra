@@ -93,7 +93,8 @@ configuration once at start.
 
 ## Configuration
 
-One JSON file describes a run. See [examples/run.json](examples/run.json).
+One JSON file describes a run. [examples/run.json](examples/run.json) is a
+minimal one and [examples/full.json](examples/full.json) uses every section.
 Unknown fields are rejected, so a misspelt setting is never silently ignored.
 
 | Section | Purpose |

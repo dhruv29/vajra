@@ -1,0 +1,96 @@
+{
+  "authorization": {
+    "operator": "you@example.com",
+    "statement": "I own this application, or hold written permission to test it."
+  },
+  "scope": {
+    "hosts": ["app.example.com", "*.staging.example.com"],
+    "cidrs": [],
+    "ports": [443, 5432, 6379]
+  },
+  "budget": {
+    "tokens": 2000000,
+    "turns": 400,
+    "sandbox_runs": 300,
+    "duration_seconds": 7200
+  },
+  "targets": ["https://app.example.com"],
+  "sandbox": {
+    "network": "vajra-task-net",
+    "proxy_url": "http://gate:3128",
+    "socks_addr": "gate:1080"
+  },
+  "nuclei": {
+    "image": "vajra-nuclei:local",
+    "templates_dir": "/opt/nuclei-templates",
+    "timeout_seconds": 1800,
+    "rate_limit": 20
+  },
+  "probe": {
+    "image": "vajra:local",
+    "timeout_seconds": 300
+  },
+  "auth": {
+    "identities": [
+      {"name": "admin", "headers_env": {"Authorization": "APP_ADMIN_TOKEN"}},
+      {"name": "user", "headers_env": {"Authorization": "APP_USER_TOKEN"}}
+    ],
+    "scan_as": "user",
+    "access_checks": [
+      {"name": "User administration", "url": "https://app.example.com/admin/users", "allow": ["admin"]},
+      {"name": "Order detail", "url": "https://app.example.com/orders/42", "allow": ["admin", "user"]}
+    ]
+  },
+  "api": {
+    "spec": "/absolute/path/to/openapi.json",
+    "base_url": "https://app.example.com",
+    "params": {"id": "42"}
+  },
+  "graphql": {
+    "endpoint": "https://app.example.com/graphql",
+    "requires_auth": true
+  },
+  "ports": {
+    "hosts": ["app.example.com"],
+    "ports": [443, 5432, 6379],
+    "expected": [443],
+    "timeout_seconds": 120
+  },
+  "crawl": {"max_pages": 200, "max_depth": 3},
+  "recon": {"max_names": 200},
+  "source": {
+    "root": "/absolute/path/to/checkout",
+    "serves": "https://app.example.com",
+    "semgrep": {
+      "image": "vajra-semgrep:local",
+      "rules_host_dir": "/absolute/path/to/vajra/rules/starter",
+      "timeout_seconds": 900
+    },
+    "secrets": true,
+    "dependencies": {"osv": true}
+  },
+  "agent": {
+    "max_steps": 40,
+    "goal": "Look closely at the order and invoice endpoints.",
+    "unsafe_requests": "deny"
+  },
+  "verify": {"reproduce_attempts": 2},
+  "refuter": {
+    "provider": "anthropic",
+    "model": "claude-opus-5-5",
+    "api_key_env": "ANTHROPIC_API_KEY",
+    "second_model": "claude-sonnet-5-5",
+    "second_min_severity": "high"
+  },
+  "topology": {
+    "assets": [
+      {"id": "orders-db", "kind": "datastore", "name": "Orders database", "data_classes": ["pii", "payment"]},
+      {"id": "payments-key", "kind": "identity", "name": "Payments API key", "data_classes": ["credentials"]}
+    ],
+    "links": [
+      {"from": "app.example.com", "to": "orders-db", "relation": "reads"},
+      {"from": "app.example.com", "to": "payments-key", "relation": "authenticates_with"}
+    ]
+  },
+  "notify": {"webhook_url_env": "VAJRA_WEBHOOK_URL"}
+}

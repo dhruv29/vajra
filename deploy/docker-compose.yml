@@ -5,6 +5,9 @@
 #   egress  ordinary network. Only the gate is attached, so it is the single
 #           way out.
 #
+# The gate serves an HTTP proxy on 3128 and SOCKS5 on 1080. Neither port is
+# published to the host; only containers on the task network can reach them.
+#
 # The gate runs as the user given by VAJRA_UID and VAJRA_GID, so the audit log
 # it writes is owned by, and readable only by, the person who started it.
 #
@@ -25,7 +28,7 @@ services:
       dockerfile: Dockerfile
     image: vajra:local
     user: "${VAJRA_UID:?set VAJRA_UID to your user id: $(id -u)}:${VAJRA_GID:?set VAJRA_GID to your group id: $(id -g)}"
-    command: ["gate", "-config", "/etc/vajra/run.json", "-listen", ":3128", "-audit", "/var/log/vajra/audit.jsonl"]
+    command: ["gate", "-config", "/etc/vajra/run.json", "-listen", ":3128", "-socks", ":1080", "-audit", "/var/log/vajra/audit.jsonl"]
     volumes:
       - "${VAJRA_CONFIG:?set VAJRA_CONFIG to the absolute path of your run configuration}:/etc/vajra/run.json:ro"
       # The audit log, readable from the host: pass it to "vajra scan -gate-audit".
