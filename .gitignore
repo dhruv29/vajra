@@ -9,3 +9,15 @@ run.local.json
 /first
 /second
 sbom.json
+
+# Credentials and private material. None of these belong in the repository.
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+kubeconfig*
+.serve-token
+# Recordings and reports hold live sessions and findings about real systems.
+*.har
+*.sarif
