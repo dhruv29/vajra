@@ -13,6 +13,7 @@ import (
 	"github.com/dhruv29/vajra/internal/agent"
 	"github.com/dhruv29/vajra/internal/config"
 	"github.com/dhruv29/vajra/internal/finding"
+	"github.com/dhruv29/vajra/internal/har"
 	"github.com/dhruv29/vajra/internal/probe"
 )
 
@@ -712,5 +713,29 @@ func TestAnUnreadableRecordingFailsTheRun(t *testing.T) {
 				t.Fatalf("err = %v; want the recording named as the cause", err)
 			}
 		})
+	}
+}
+
+// sizedFile reports a fixed size, standing in for a file too large to read.
+type sizedFile struct {
+	os.FileInfo
+	size int64
+}
+
+func (s sizedFile) Size() int64 { return s.size }
+
+func TestAnOversizedRecordingIsRefusedBeforeItIsRead(t *testing.T) {
+	cfg, policy := labConfig(t, "none", withRecording(0))
+	deps := labDeps(&labRunner{}, "", nil)
+	deps.Stat = func(string) (os.FileInfo, error) { return sizedFile{size: har.DefaultMaxBytes + 1}, nil }
+	deps.ReadFile = func(string) ([]byte, error) {
+		t.Fatal("the oversized recording was read")
+		return nil, nil
+	}
+
+	_, err := Scan(context.Background(), cfg, policy, deps)
+
+	if err == nil || !strings.Contains(err.Error(), "export it without response bodies") {
+		t.Fatalf("err = %v; want the size refused with advice", err)
 	}
 }

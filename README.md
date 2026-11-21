@@ -311,7 +311,10 @@ VAJRA_JIRA_EMAIL=you@example.com VAJRA_JIRA_TOKEN=... \
   (and, in Jira, the label `vajra-ID`); if a ticket with that marker already
   exists, open or closed, it is reported and nothing new is filed. GitHub's
   search index lags by a few seconds, so filing the same finding twice in
-  quick succession can still make two issues.
+  quick succession can still make two issues. On GitHub only issues opened
+  by the token's own account count as already filed, so a stranger cannot
+  block a filing by opening an issue with the marker; use the same account
+  for all filing.
 - Credentials are read only from the environment, never from flags, and never
   appear in errors. The API must be https (plain http only to a loopback
   address), redirects are not followed, and replies are size-capped.

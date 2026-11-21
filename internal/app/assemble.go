@@ -128,6 +128,9 @@ func withDefaults(deps Deps) Deps {
 	if deps.ReadFile == nil {
 		deps.ReadFile = os.ReadFile
 	}
+	if deps.Stat == nil {
+		deps.Stat = os.Stat
+	}
 	return deps
 }
 

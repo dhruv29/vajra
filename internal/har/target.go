@@ -72,7 +72,7 @@ func parseTarget(raw string, policy *scope.Policy, secrets *secretSet) (target, 
 	}
 	t := target{
 		origin:      origin(scheme, host, port),
-		escapedPath: u.EscapedPath(),
+		escapedPath: canonicalPath(u.Path),
 		decodedPath: u.Path,
 		query:       query,
 	}
@@ -182,4 +182,16 @@ func splitPairs(raw string) []pair {
 
 func validParamName(name string) bool {
 	return strings.TrimSpace(name) != "" && len(name) <= maxNameLength
+}
+
+// canonicalPath re-escapes a decoded path one segment at a time. A recording
+// can spell the same path many ways ("%2f" or "%2F", "%61" for "a"); the
+// credential scrub compares exact text, so it needs the one spelling that the
+// remembered credentials were also written in.
+func canonicalPath(decoded string) string {
+	segments := strings.Split(decoded, "/")
+	for i, segment := range segments {
+		segments[i] = url.PathEscape(segment)
+	}
+	return strings.Join(segments, "/")
 }

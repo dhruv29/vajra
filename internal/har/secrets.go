@@ -8,10 +8,11 @@ import (
 )
 
 const (
-	// maxSecrets bounds how many distinct credential values are remembered
-	// for the final scrub. It keeps the scrub fast on a hostile file; the
-	// name-based rules, which do not depend on it, still apply beyond it.
-	maxSecrets = 1024
+	// maxSecrets bounds how many distinct credential spellings are remembered
+	// for the final scrub, which keeps the scrub fast on a hostile file. A
+	// recording with more than this is refused outright: scrubbing only the
+	// first ones would let the later credentials through.
+	maxSecrets = 8192
 	// minSecretLength matches the shortest value redact.Values scrubs on its
 	// own; shorter values would only erase ordinary text.
 	minSecretLength = 8
@@ -42,8 +43,10 @@ func looksSecret(name string) bool {
 // secretSet remembers credential values seen anywhere in the recording. It is
 // only ever used to scrub what is kept; it is never returned.
 type secretSet struct {
-	values   map[string]struct{}
-	verdicts map[string]bool // lower-cased header name -> sensitive
+	values map[string]struct{}
+	// overflowed is set when a credential could not be remembered.
+	overflowed bool
+	verdicts   map[string]bool // lower-cased header name -> sensitive
 }
 
 func newSecretSet() *secretSet {
@@ -77,7 +80,11 @@ func (s *secretSet) remember(value string) {
 		return
 	}
 	for _, spelling := range []string{value, url.QueryEscape(value), url.PathEscape(value)} {
+		if _, known := s.values[spelling]; known {
+			continue
+		}
 		if len(s.values) >= maxSecrets {
+			s.overflowed = true
 			return
 		}
 		s.values[spelling] = struct{}{}

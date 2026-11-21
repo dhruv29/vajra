@@ -10,6 +10,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"os"
 	"sort"
 	"time"
 
@@ -52,6 +53,8 @@ type Deps struct {
 	Pause func() bool
 	// ReadFile reads the API description. Nil means os.ReadFile.
 	ReadFile func(path string) ([]byte, error)
+	// Stat describes a file before it is read. Nil means os.Stat.
+	Stat func(path string) (os.FileInfo, error)
 	// ModelBaseURL, ModelClient and OSVBaseURL override endpoints in tests.
 	ModelBaseURL string
 	ModelClient  *http.Client

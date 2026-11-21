@@ -122,9 +122,13 @@ func (g *GitHub) File(ctx context.Context, issue Issue) (Result, error) {
 // find searches the repository's issues for the marker. GitHub's search
 // index lags a little behind, so an issue filed seconds earlier may not be
 // found yet.
+//
+// Only issues opened by the token's own account count. On a public
+// repository anyone can open an issue carrying the marker, and that must not
+// stop a confirmed finding from being filed.
 func (g *GitHub) find(ctx context.Context, findingID string) (githubIssue, bool, error) {
 	query := url.Values{}
-	query.Set("q", fmt.Sprintf("repo:%s/%s is:issue in:body %q", g.owner, g.repo, markerLine(findingID)))
+	query.Set("q", fmt.Sprintf("repo:%s/%s is:issue author:@me in:body %q", g.owner, g.repo, markerLine(findingID)))
 	query.Set("per_page", strconv.Itoa(githubSearchPage))
 	var reply struct {
 		Items []githubIssue `json:"items"`

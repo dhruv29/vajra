@@ -87,7 +87,7 @@ func TestGitHubFilesANewIssueWithTheFindingMarker(t *testing.T) {
 	if got != want {
 		t.Fatalf("result = %+v, want %+v", got, want)
 	}
-	if q, _ := fake.query.Load().(string); q != `repo:acme/shop is:issue in:body "vajra-finding: 0a1b2c3d4e5f6071"` {
+	if q, _ := fake.query.Load().(string); q != `repo:acme/shop is:issue author:@me in:body "vajra-finding: 0a1b2c3d4e5f6071"` {
 		t.Fatalf("search query = %q", q)
 	}
 	sent, _ := fake.created.Load().(map[string]string)

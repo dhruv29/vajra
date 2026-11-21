@@ -3,6 +3,7 @@ package har
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/url"
 	"reflect"
@@ -439,13 +440,40 @@ func TestParseMarksActionGETsAsStateChangingAndKeepsThemOutOfSeeds(t *testing.T)
 	}
 }
 
-func TestParseScrubsAPathWhoseEscapeASecretSplits(t *testing.T) {
-	har := harOf(t, get("https://app.example.com/%41BCDEFGHIJ/x", cookie("s", "1BCDEFGHIJ")))
-	rec := mustParse(t, har, Options{})
-	if got := rec.Requests[0].URL; got != "https://app.example.com/"+escapedPlaceholder {
-		t.Errorf("URL = %q; want the whole path replaced", got)
+func TestParseScrubsACredentialHoweverThePathSpellsIt(t *testing.T) {
+	cases := map[string]struct{ url, secret string }{
+		"lower-case escapes":    {"https://app.example.com/share/s3cr3t%2fT0ken%2babcdEF/view", "s3cr3t/T0ken+abcdEF"},
+		"an escaped plain char": {"https://app.example.com/u/%61bcdefghSESSIONTOKEN", "abcdefghSESSIONTOKEN"},
 	}
-	assertAllInScope(t, testPolicy(t), rec)
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			rec := mustParse(t, harOf(t, get(tc.url, cookie("sid", tc.secret))), Options{})
+			raw, err := json.Marshal(rec)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, spelling := range []string{"T0ken", "SESSIONTOKEN"} {
+				if strings.Contains(string(raw), spelling) {
+					t.Fatalf("the cookie value survived in %s", raw)
+				}
+			}
+			assertAllInScope(t, testPolicy(t), rec)
+		})
+	}
+}
+
+func TestParseRefusesARecordingWithMoreCredentialsThanItCanScrub(t *testing.T) {
+	entries := make([]entry, 0, maxSecrets+2)
+	for i := 0; i <= maxSecrets; i++ {
+		entries = append(entries, get("https://app.example.com/p", cookie("c", fmt.Sprintf("rotating-value-%06d", i))))
+	}
+	entries = append(entries, get("https://app.example.com/u/REALSESSIONTOKEN123", cookie("sid", "REALSESSIONTOKEN123")))
+
+	_, err := Parse(strings.NewReader(harOf(t, entries...)), testPolicy(t), Options{})
+
+	if err == nil || !strings.Contains(err.Error(), "more distinct credentials") {
+		t.Fatalf("err = %v; want the recording refused rather than partly scrubbed", err)
+	}
 }
 
 func TestParseScrubsSecretsFromParameterNames(t *testing.T) {

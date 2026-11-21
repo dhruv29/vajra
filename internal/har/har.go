@@ -120,6 +120,9 @@ func Parse(r io.Reader, policy *scope.Policy, opts Options) (Recording, error) {
 	if err := decodeEntries(r, opts.MaxBytes, b.add); err != nil {
 		return Recording{}, err
 	}
+	if b.secrets.overflowed {
+		return Recording{}, errors.New("har: the recording holds more distinct credentials than can be scrubbed safely; record a shorter session")
+	}
 	return b.finish(), nil
 }
 

@@ -96,6 +96,11 @@ func (r *run) importRecording(context.Context) ([]finding.Finding, error) {
 	if r.cfg.Recording == nil {
 		return nil, nil
 	}
+	// The size is checked before the file is read, so a recording of several
+	// gigabytes is refused instead of being loaded whole.
+	if info, err := r.deps.Stat(r.cfg.Recording.Path); err == nil && info.Size() > har.DefaultMaxBytes {
+		return nil, fmt.Errorf("recording: the file is %d MB, more than the %d MB accepted; export it without response bodies", info.Size()>>20, har.DefaultMaxBytes>>20)
+	}
 	raw, err := r.deps.ReadFile(r.cfg.Recording.Path)
 	if err != nil {
 		return nil, fmt.Errorf("recording: %w", err)
