@@ -66,8 +66,9 @@ make build images                        # the CLI and the three container image
 
 cp examples/run.json run.local.json      # then edit: who authorised it, scope, limits
 
-mkdir -p data/audit && chmod 777 data/audit   # the gate writes its audit log here
-VAJRA_CONFIG="$PWD/run.local.json" VAJRA_AUDIT_DIR="$PWD/data/audit" \
+mkdir -p data/audit                      # the gate writes its audit log here
+VAJRA_UID=$(id -u) VAJRA_GID=$(id -g) \
+  VAJRA_CONFIG="$PWD/run.local.json" VAJRA_AUDIT_DIR="$PWD/data/audit" \
   docker compose -f deploy/docker-compose.yml up -d --build
 
 export ANTHROPIC_API_KEY=...             # only if refuter.provider is "anthropic"

@@ -28,8 +28,9 @@ jobs:
         run: make -C vajra build images
       - name: Start the gate
         run: |
-          mkdir -p data/audit && chmod 777 data/audit
-          VAJRA_CONFIG="$PWD/security/run.json" VAJRA_AUDIT_DIR="$PWD/data/audit" \
+          mkdir -p data/audit
+          VAJRA_UID=$(id -u) VAJRA_GID=$(id -g) \
+            VAJRA_CONFIG="$PWD/security/run.json" VAJRA_AUDIT_DIR="$PWD/data/audit" \
             docker compose -f vajra/deploy/docker-compose.yml up -d --build
       - name: Scan, and compare with the last accepted run
         run: |

@@ -85,9 +85,13 @@ cat > "$WORK/run.json" <<EOF
 }
 EOF
 chmod a+r "$WORK/run.json"
-mkdir -p "$WORK/audit" && chmod 777 "$WORK/audit"
+mkdir -p "$WORK/audit"
 
+# The gate runs as the invoking user, so the audit log it writes (owner-only)
+# is readable by the person who started it. On Linux, file ownership inside a
+# bind mount is real; a gate running as another user would lock them out.
 docker create --name "$GATE" --network "$TASK_NET" --network-alias gate \
+  --user "$(id -u):$(id -g)" \
   --read-only --cap-drop ALL --security-opt no-new-privileges \
   -v "$WORK/run.json:/etc/vajra/run.json:ro" \
   -v "$WORK/audit:/var/log/vajra" \
