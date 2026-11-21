@@ -45,6 +45,8 @@ func runBench(args []string, stdout, stderr io.Writer) (int, error) {
 	minPrecision := flags.Float64("min-precision", 0, "exit with status 3 when precision is below this, from 0 to 1")
 	minRecall := flags.Float64("min-recall", 0, "exit with status 3 when recall is below this, from 0 to 1")
 	asJSON := flags.Bool("json", false, "print the score as JSON")
+	unreviewed := flags.Bool("unreviewed", false,
+		"also count findings that passed every check but were not reviewed (a run without a model)")
 	if err := flags.Parse(args); err != nil {
 		return exitUsage, err
 	}
@@ -67,7 +69,7 @@ func runBench(args []string, stdout, stderr io.Writer) (int, error) {
 	if err != nil {
 		return exitError, err
 	}
-	score := bench.Evaluate(key, run.Report.Findings)
+	score := bench.EvaluateWith(key, run.Report.Findings, bench.Options{CountUnreviewed: *unreviewed})
 	if *asJSON {
 		if err := writeJSON(stdout, score); err != nil {
 			return exitError, err

@@ -1,0 +1,17 @@
+{
+  "name": "Vulnerable lab app (bench/labapp, scripts/e2e.sh)",
+  "expectations": [
+    {"name": "Search page reflects input into HTML unescaped", "present": true, "rule_contains": "reflected-xss", "target_contains": "/vuln/search?"},
+    {"name": "Look-up form reflects input into an attribute unescaped", "present": true, "rule_contains": "reflected-xss", "target_contains": "/vuln/lookup?"},
+    {"name": "Product page shows a database error for one quote", "present": true, "rule_contains": "sql-error", "target_contains": "/vuln/product?"},
+    {"name": "Redirect follows any next URL", "present": true, "rule_contains": "open-redirect", "target_contains": "/vuln/redirect?"},
+    {"name": "Ordinary user is served the admin sales report", "present": true, "rule_contains": "unauthorized-access", "target_contains": "/vuln/admin/report"},
+    {"name": "Anonymous visitor is served the admin sales report", "present": true, "rule_contains": "unauthenticated-access", "target_contains": "/vuln/admin/report"},
+    {"name": "Decoy: search page escapes its input", "present": false, "target_contains": "/safe/search?"},
+    {"name": "Decoy: search API reflects input only as JSON", "present": false, "target_contains": "/safe/api/search?"},
+    {"name": "Decoy: article always shows a database error", "present": false, "target_contains": "/safe/status?"},
+    {"name": "Decoy: redirect goes only to same-site paths", "present": false, "target_contains": "/safe/redirect?"},
+    {"name": "Decoy: input lands only inside an HTML comment", "present": false, "target_contains": "/safe/comment?"},
+    {"name": "Decoy: settings page is protected correctly", "present": false, "target_contains": "/safe/admin/settings"}
+  ]
+}

@@ -16,7 +16,11 @@ const (
 // Text renders the score as a short plain-text table for a terminal.
 func (s Score) Text() string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "Benchmark: %s\n\n", printable(s.Key))
+	fmt.Fprintf(&b, "Benchmark: %s\n", printable(s.Key))
+	if s.CountsUnreviewed {
+		fmt.Fprintln(&b, "Counted as reported: confirmed findings, and findings that passed every check but were not reviewed.")
+	}
+	fmt.Fprintln(&b)
 	w := tabwriter.NewWriter(&b, 0, 0, tabPadding, ' ', 0)
 	fmt.Fprintln(w, "RESULT\tEXPECTATION\tFINDING\tSTATUS")
 	for _, o := range s.Outcomes {

@@ -346,6 +346,44 @@ report:
 `kind` in a key takes `dast`, `sast` or `sca`. [bench/lab.json](bench/lab.json)
 is the key for the lab that `scripts/e2e.sh` builds.
 
+Only `confirmed` findings count as reported, and nothing is confirmed without a
+model reviewer. `-unreviewed` also counts findings that passed every check
+(evidence, scope, reproduction) and are unconfirmed only because no review took
+place; findings that failed or could not finish any other stage still do not
+count. The score says when this was used.
+
+## Measuring Vajra
+
+[bench/labapp](bench/labapp) is a small, **intentionally vulnerable** web
+application, for the isolated test lab only, and
+[bench/labapp.json](bench/labapp.json) is its answer key. It has:
+
+- six true flaws: input reflected unescaped into HTML text, the same into an
+  attribute on a page reachable only through a GET form, a (simulated)
+  database error for one quote but not for two, an open redirect through
+  `?next=`, and an admin-only report served to an ordinary account and to
+  anonymous visitors;
+- six decoys that must not be reported: an HTML-escaped reflection, a raw
+  reflection inside JSON served as JSON, a page that always shows a database
+  error, a redirect limited to same-site paths, input that lands only inside an
+  HTML comment it cannot close, and an admin page that is protected correctly.
+
+`./scripts/e2e.sh` builds it (`deploy/labapp.Dockerfile`), puts it behind the
+gate, scans it with crawling, the input checks and access checks, scores the
+run with `vajra bench -unreviewed`, prints the score, and fails if any true flaw
+is missed, any decoy is reported, or anything else is reported. With
+`E2E_REFUTER=anthropic` the score counts only findings the reviewer confirmed.
+
+Current score (no reviewer): **6 of 6 true flaws found, 0 of 6 decoys
+reported, nothing else reported** (precision 1.00, recall 1.00).
+
+What this shows: the crawler, the input checks and the access checks find
+these flaws through the real gate and sandbox, re-test them, and keep away from
+the obvious look-alikes. What it does not show: how Vajra does on real
+applications. The lab is tiny, every flaw is a textbook case, and it was written
+by the same people who wrote the detectors, knowing their proof rules. Treat it
+as a regression check, not an independent benchmark.
+
 ## Fixing a code finding
 
 ```bash
@@ -378,6 +416,8 @@ Verified by `scripts/e2e.sh` against lab targets in Docker:
   flaws, and no credential or full secret reaches a report or a saved run.
 - Port discovery finds an unexpected open port through the SOCKS5 gate and
   confirms it with a second connection.
+- Crawling, the input checks and the access checks find every true flaw in the
+  vulnerable lab app and report none of its decoys (see Measuring Vajra).
 
 Covered by unit tests only, not yet run against a real system:
 
@@ -385,7 +425,7 @@ Covered by unit tests only, not yet run against a real system:
   patch proposer. They are tested against a stand-in for the model API.
   `E2E_REFUTER=anthropic ./scripts/e2e.sh` runs the reviewer for real and
   scores it against the answer key; it needs a valid API key.
-- Host discovery, crawling and dependency advisories.
+- Host discovery and dependency advisories.
 - Blast-radius rules, scores and attack chains are heuristics that have not
   been calibrated against real incidents.
 

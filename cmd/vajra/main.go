@@ -61,7 +61,7 @@ Usage:
   vajra report   -data DIR -run ID [-format html|md|json] [-out FILE]
   vajra serve    -data DIR [-listen 127.0.0.1:8700]
   vajra diff     -data DIR -base ID -head ID [-format md|json] [-fail-on-new]
-  vajra bench    -data DIR -run ID -key FILE [-min-precision 0.9] [-min-recall 0.9] [-json]
+  vajra bench    -data DIR -run ID -key FILE [-min-precision 0.9] [-min-recall 0.9] [-unreviewed] [-json]
   vajra exposure -data DIR -run ID [-json]
   vajra fix      -config run.json -data DIR -run ID -finding ID [-out FILE.patch]
   vajra ticket   -data DIR -run ID -finding ID [-out FILE.md]

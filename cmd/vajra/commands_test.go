@@ -184,6 +184,21 @@ func TestBenchScoresARunAgainstAKey(t *testing.T) {
 	}
 }
 
+func TestBenchUnreviewedSaysWhatItCounted(t *testing.T) {
+	data := t.TempDir()
+	id := saveDemo(t, data)
+	key := writeFile(t, "key.json", demoKey)
+
+	code, stdout, stderr := invoke("bench", "-data", data, "-run", id, "-key", key, "-unreviewed")
+
+	if code != exitOK || stderr != "" {
+		t.Fatalf("code = %d, stderr = %q", code, stderr)
+	}
+	if !strings.Contains(stdout, "were not reviewed") {
+		t.Fatalf("the score does not say unreviewed findings were counted:\n%s", stdout)
+	}
+}
+
 func TestBenchExitsThreeBelowTheThresholds(t *testing.T) {
 	data := t.TempDir()
 	id := saveDemo(t, data)

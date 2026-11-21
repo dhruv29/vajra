@@ -12,7 +12,10 @@
 #   7. code analysis finds a planted injection and ignores the safe variant,
 #   8. access checks, API tests, GraphQL checks, port discovery and the secret
 #      search find planted flaws, and no credential or full secret reaches a
-#      report.
+#      report,
+#   9. against a deliberately vulnerable lab application (bench/labapp) with an
+#      answer key (bench/labapp.json), every true flaw is found and no decoy is
+#      reported; the score is printed.
 #
 # Set E2E_REFUTER=anthropic (with ANTHROPIC_API_KEY) to also have a live model
 # review the findings and to score the result against bench/lab.json.
@@ -360,5 +363,71 @@ if [ "${E2E_REFUTER:-none}" = "anthropic" ]; then
     || fail "the lab benchmark did not reach full precision and recall"
   pass "every planted flaw was confirmed and nothing else was"
 fi
+
+echo "== measured accuracy on the vulnerable lab app"
+# bench/labapp is INTENTIONALLY VULNERABLE: true flaws under /vuln/ and decoys
+# under /safe/ that must not be reported. bench/labapp.json is the answer key.
+docker build -q -t vajra-labapp:local -f deploy/labapp.Dockerfile . >/dev/null
+docker stop "$TARGET" >/dev/null 2>&1 || true
+docker rm -f "$TARGET" >/dev/null 2>&1 || true
+docker run -d --name "$TARGET" --network "$LAB_NET" --network-alias target \
+  --read-only --cap-drop ALL --security-opt no-new-privileges vajra-labapp:local >/dev/null
+wait_for_target
+cat > "$WORK/labapp.json" <<EOF
+{
+  "authorization": {"operator": "e2e", "statement": "Intentionally vulnerable lab app started by scripts/e2e.sh"},
+  "scope": {"hosts": ["target"], "cidrs": ["$LAB_SUBNET"], "ports": [80]},
+  "budget": {"tokens": 200000, "turns": 40, "sandbox_runs": 60, "duration_seconds": 1200},
+  "targets": ["http://target/"],
+  "sandbox": {"network": "$TASK_NET", "proxy_url": "http://gate:3128"},
+  "nuclei": {"image": "vajra-nuclei:local", "templates_dir": "/opt/nuclei-templates/http/exposures/configs/git-config.yaml", "timeout_seconds": 300},
+  "probe": {"image": "vajra:local", "timeout_seconds": 120},
+  "crawl": {"max_pages": 50, "max_depth": 2},
+  "inject": {"max_requests": 500},
+  "auth": {
+    "identities": [
+      {"name": "admin", "headers_env": {"Authorization": "VAJRA_E2E_ADMIN"}},
+      {"name": "user", "headers_env": {"Authorization": "VAJRA_E2E_USER"}}
+    ],
+    "access_checks": [
+      {"name": "Sales report", "url": "http://target/vuln/admin/report", "allow": ["admin"]},
+      {"name": "Shop settings", "url": "http://target/safe/admin/settings", "allow": ["admin"]}
+    ]
+  },
+  "refuter": {"provider": "${E2E_REFUTER:-none}"}
+}
+EOF
+VAJRA_E2E_ADMIN="Bearer lab-admin-token" VAJRA_E2E_USER="Bearer lab-user-token" \
+  "$WORK/vajra" scan -config "$WORK/labapp.json" -out "$WORK/labapp-report.json" -data "$WORK/labdata" -gate-audit "$WORK/audit/audit.jsonl"
+lab_run="$("$WORK/vajra" runs -data "$WORK/labdata" | awk 'NR==2 {print $1}')"
+[ -n "$lab_run" ] || fail "the lab app run was not saved"
+# With no live reviewer nothing is "confirmed", so the score also counts
+# findings that passed every check and were only left unreviewed.
+lab_bench() {
+  if [ "${E2E_REFUTER:-none}" = "anthropic" ]; then
+    "$WORK/vajra" bench -data "$WORK/labdata" -run "$lab_run" -key bench/labapp.json "$@"
+  else
+    "$WORK/vajra" bench -data "$WORK/labdata" -run "$lab_run" -key bench/labapp.json -unreviewed "$@"
+  fi
+}
+lab_ok=1
+lab_table="$(lab_bench -min-precision 1 -min-recall 1)" || lab_ok=0
+echo "$lab_table"
+lab_bench -json > "$WORK/labapp-score.json"
+python3 - "$WORK/labapp-score.json" <<'PYEOF' || fail "the lab app score could not be read"
+import json, sys
+s = json.load(open(sys.argv[1]))
+real = s["true_positives"] + s["false_negatives"]
+decoys = s["false_positives"] + s["true_negatives"]
+print("SCORE: found %d of %d true flaws; reported %d of %d decoys; %d unexpected finding(s); precision %.2f, recall %.2f"
+      % (s["true_positives"], real, s["false_positives"], decoys, len(s["unexpected"]), s["precision"], s["recall"]))
+for o in s["outcomes"]:
+    if o["result"] in ("false_negative", "false_positive"):
+        print("  %s: %s" % (o["result"], o["expectation"]["name"]))
+PYEOF
+[ "$lab_ok" = 1 ] || fail "in the lab app a true flaw was missed, a decoy was reported, or an unexpected finding was raised: $(cat "$WORK/labapp-report.json")"
+grep -q 'lab-user-token\|lab-admin-token' "$WORK/labapp-report.json" && fail "a test account's credential is in the lab app report"
+pass "every true flaw in the lab app was found and no decoy was reported"
+if [ -n "${E2E_KEEP:-}" ]; then cp "$WORK/labapp-report.json" "$WORK/labapp-score.json" "$E2E_KEEP/"; fi
 
 echo "ALL CHECKS PASSED"

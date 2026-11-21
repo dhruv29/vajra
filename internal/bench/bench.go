@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/dhruv29/vajra/internal/finding"
+	"github.com/dhruv29/vajra/internal/verify"
 )
 
 // The four ways an expectation can fare.
@@ -84,8 +85,21 @@ type Score struct {
 	// Recall is TP / (TP + FN), 1 when the key has no real issues.
 	Recall float64 `json:"recall"`
 	// NoiseRemoved is the share of the scanner's raw results that
-	// verification kept out of "confirmed".
+	// verification kept out of what counts as reported.
 	NoiseRemoved float64 `json:"noise_removed"`
+	// CountsUnreviewed is true when findings that passed every check except
+	// a review that never took place were counted as reported (see Options).
+	CountsUnreviewed bool `json:"counts_unreviewed,omitempty"`
+}
+
+// Options changes what counts as reported.
+type Options struct {
+	// CountUnreviewed also counts as reported a finding that is unconfirmed
+	// only because no reviewer looked at it: every verification stage passed
+	// except the review, which was inconclusive. It measures the checks and
+	// their reproduction on a run without a model. A finding that failed or
+	// could not finish any other stage still does not count.
+	CountUnreviewed bool
 }
 
 // ParseKey reads and validates an answer key. Unknown fields are rejected so
@@ -147,10 +161,17 @@ func validateFilters(e Expectation) error {
 // real issue: expectations take, in key order, the first confirmed match no
 // earlier expectation took.
 func Evaluate(key Key, findings []finding.Finding) Score {
-	score := Score{Key: key.Name, Outcomes: make([]Outcome, 0, len(key.Expectations))}
+	return EvaluateWith(key, findings, Options{})
+}
+
+// EvaluateWith is Evaluate with options; with the zero Options it is
+// Evaluate.
+func EvaluateWith(key Key, findings []finding.Finding, opts Options) Score {
+	score := Score{Key: key.Name, Outcomes: make([]Outcome, 0, len(key.Expectations)), CountsUnreviewed: opts.CountUnreviewed}
+	isReported := func(f finding.Finding) bool { return reported(f, opts) }
 	consumed := make([]bool, len(findings))
 	for _, e := range key.Expectations {
-		o := judge(e, findings, consumed)
+		o := judge(e, findings, consumed, isReported)
 		score.Outcomes = append(score.Outcomes, o)
 		switch o.Result {
 		case TruePositive:
@@ -163,11 +184,11 @@ func Evaluate(key Key, findings []finding.Finding) Score {
 			score.TrueNegatives++
 		}
 	}
-	score.Unexpected = unexpected(key, findings, consumed)
+	score.Unexpected = unexpected(key, findings, consumed, isReported)
 	reported := score.TruePositives + score.FalsePositives + len(score.Unexpected)
 	score.Precision = ratio(score.TruePositives, reported, perfect)
 	score.Recall = ratio(score.TruePositives, score.TruePositives+score.FalseNegatives, perfect)
-	score.NoiseRemoved = ratio(len(findings)-confirmedCount(findings), len(findings), 0)
+	score.NoiseRemoved = ratio(len(findings)-reportedCount(findings, isReported), len(findings), 0)
 	return score
 }
 
@@ -176,10 +197,36 @@ func (s Score) Passed(minPrecision, minRecall float64) bool {
 	return s.Precision >= minPrecision && s.Recall >= minRecall
 }
 
-// judge decides one expectation. A real issue consumes the confirmed finding
+// reported says whether a finding counts as reported under opts.
+func reported(f finding.Finding, opts Options) bool {
+	if f.Status == finding.Confirmed {
+		return true
+	}
+	return opts.CountUnreviewed && f.Status == finding.Unconfirmed && onlyReviewMissing(f.Verdicts)
+}
+
+// reviewStage is the name of the verification stage a model reviewer runs.
+var reviewStage = verify.RefuteStage{}.Name()
+
+// onlyReviewMissing reports whether the review stage ran and was
+// inconclusive while every other stage passed.
+func onlyReviewMissing(verdicts []finding.Verdict) bool {
+	reviewed := false
+	for _, v := range verdicts {
+		switch {
+		case v.Stage == reviewStage && v.Outcome == finding.Inconclusive:
+			reviewed = true
+		case v.Outcome != finding.Pass:
+			return false
+		}
+	}
+	return reviewed
+}
+
+// judge decides one expectation. A real issue consumes the reported finding
 // that counts for it and ignores findings already consumed; a decoy consumes
 // nothing.
-func judge(e Expectation, findings []finding.Finding, consumed []bool) Outcome {
+func judge(e Expectation, findings []finding.Finding, consumed []bool, isReported func(finding.Finding) bool) Outcome {
 	candidates := findings
 	if e.Present {
 		candidates = make([]finding.Finding, 0, len(findings))
@@ -187,16 +234,15 @@ func judge(e Expectation, findings []finding.Finding, consumed []bool) Outcome {
 			if consumed[i] || !matches(e, f) {
 				continue
 			}
-			if f.Status == finding.Confirmed {
+			if isReported(f) {
 				consumed[i] = true
 				return Outcome{Expectation: e, Result: TruePositive, FindingID: f.ID, Status: f.Status}
 			}
 			candidates = append(candidates, f)
 		}
 	}
-	best, found := bestMatch(e, candidates)
-	reported := found && best.Status == finding.Confirmed
-	o := Outcome{Expectation: e, Result: result(e.Present, reported)}
+	best, found := bestMatch(e, candidates, isReported)
+	o := Outcome{Expectation: e, Result: result(e.Present, found && isReported(best))}
 	if found {
 		o.FindingID, o.Status = best.ID, best.Status
 	}
@@ -217,15 +263,21 @@ func result(present, reported bool) string {
 }
 
 // bestMatch returns the matching finding that got furthest through
-// verification; the first one wins a tie.
-func bestMatch(e Expectation, findings []finding.Finding) (finding.Finding, bool) {
+// verification, a reported one first; the first one wins a tie.
+func bestMatch(e Expectation, findings []finding.Finding, isReported func(finding.Finding) bool) (finding.Finding, bool) {
 	var best finding.Finding
 	found := false
+	rank := func(f finding.Finding) int {
+		if isReported(f) {
+			return closeness(finding.Confirmed)
+		}
+		return closeness(f.Status)
+	}
 	for _, f := range findings {
 		if !matches(e, f) {
 			continue
 		}
-		if !found || closeness(f.Status) > closeness(best.Status) {
+		if !found || rank(f) > rank(best) {
 			best, found = f, true
 		}
 	}
@@ -265,12 +317,12 @@ func hasCWE(have []string, want string) bool {
 	return false
 }
 
-// unexpected lists, sorted, the confirmed findings no expectation accounts
+// unexpected lists, sorted, the reported findings no expectation accounts
 // for: not consumed by a real issue and not matching a decoy.
-func unexpected(key Key, findings []finding.Finding, consumed []bool) []string {
+func unexpected(key Key, findings []finding.Finding, consumed []bool, isReported func(finding.Finding) bool) []string {
 	ids := []string{}
 	for i, f := range findings {
-		if f.Status == finding.Confirmed && !consumed[i] && !matchesDecoy(key, f) {
+		if isReported(f) && !consumed[i] && !matchesDecoy(key, f) {
 			ids = append(ids, f.ID)
 		}
 	}
@@ -287,10 +339,10 @@ func matchesDecoy(key Key, f finding.Finding) bool {
 	return false
 }
 
-func confirmedCount(findings []finding.Finding) int {
+func reportedCount(findings []finding.Finding, isReported func(finding.Finding) bool) int {
 	n := 0
 	for _, f := range findings {
-		if f.Status == finding.Confirmed {
+		if isReported(f) {
 			n++
 		}
 	}

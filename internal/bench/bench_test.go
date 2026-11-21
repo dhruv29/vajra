@@ -1,6 +1,7 @@
 package bench
 
 import (
+	"os"
 	"reflect"
 	"strings"
 	"testing"
@@ -322,6 +323,95 @@ func TestEachConfirmedFindingCountsForOneRealIssueAtMost(t *testing.T) {
 			if !reflect.DeepEqual(got.Unexpected, tt.wantUnexpected) || got.Precision != tt.wantPrecision || got.Recall != tt.wantRecall {
 				t.Fatalf("unexpected = %v, precision = %v, recall = %v; want %v, %v, %v",
 					got.Unexpected, got.Precision, got.Recall, tt.wantUnexpected, tt.wantPrecision, tt.wantRecall)
+			}
+		})
+	}
+}
+
+// withVerdicts builds the trail a finding carries through verification.
+func withVerdicts(f finding.Finding, outcomes ...[2]string) finding.Finding {
+	for _, o := range outcomes {
+		f.Verdicts = append(f.Verdicts, finding.Verdict{Stage: o[0], Outcome: finding.Outcome(o[1])})
+	}
+	return f
+}
+
+func TestCountUnreviewedCountsOnlyFindingsMissingJustTheReview(t *testing.T) {
+	pass, inconclusive, fail := string(finding.Pass), string(finding.Inconclusive), string(finding.Fail)
+	unreviewed := withVerdicts(sqli("f1", finding.Unconfirmed),
+		[2]string{"evidence", pass}, [2]string{"scope", pass}, [2]string{"reproduce", pass}, [2]string{"refute", inconclusive})
+	tests := []struct {
+		name     string
+		f        finding.Finding
+		opts     Options
+		reported bool
+	}{
+		{"unreviewed finding counts with the option", unreviewed, Options{CountUnreviewed: true}, true},
+		{"unreviewed finding does not count without it", unreviewed, Options{}, false},
+		{"confirmed finding counts either way", sqli("f1", finding.Confirmed), Options{CountUnreviewed: true}, true},
+		{"reproduction inconclusive does not count", withVerdicts(sqli("f1", finding.Unconfirmed),
+			[2]string{"evidence", pass}, [2]string{"reproduce", inconclusive}, [2]string{"refute", inconclusive}), Options{CountUnreviewed: true}, false},
+		{"refuted by reproduction does not count", withVerdicts(sqli("f1", finding.Refuted),
+			[2]string{"evidence", pass}, [2]string{"reproduce", fail}), Options{CountUnreviewed: true}, false},
+		{"unconfirmed with no review verdict does not count", withVerdicts(sqli("f1", finding.Unconfirmed),
+			[2]string{"evidence", inconclusive}), Options{CountUnreviewed: true}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			real := Key{Name: "k", Expectations: []Expectation{{Name: "real", Present: true, CWE: "cwe-89"}}}
+			decoy := Key{Name: "k", Expectations: []Expectation{{Name: "decoy", Present: false, CWE: "cwe-89"}}}
+			other := Key{Name: "k", Expectations: []Expectation{{Name: "other", Present: true, CWE: "cwe-22"}}}
+			findings := []finding.Finding{tt.f}
+
+			gotReal := EvaluateWith(real, findings, tt.opts)
+			gotDecoy := EvaluateWith(decoy, findings, tt.opts)
+			gotOther := EvaluateWith(other, findings, tt.opts)
+
+			wantReal, wantDecoy, wantUnexpected := FalseNegative, TrueNegative, 0
+			if tt.reported {
+				wantReal, wantDecoy, wantUnexpected = TruePositive, FalsePositive, 1
+			}
+			if gotReal.Outcomes[0].Result != wantReal || gotDecoy.Outcomes[0].Result != wantDecoy || len(gotOther.Unexpected) != wantUnexpected {
+				t.Fatalf("real %s, decoy %s, unexpected %v; want %s, %s, %d",
+					gotReal.Outcomes[0].Result, gotDecoy.Outcomes[0].Result, gotOther.Unexpected, wantReal, wantDecoy, wantUnexpected)
+			}
+			if gotReal.CountsUnreviewed != tt.opts.CountUnreviewed {
+				t.Errorf("CountsUnreviewed = %v", gotReal.CountsUnreviewed)
+			}
+		})
+	}
+}
+
+func TestEvaluateIsEvaluateWithZeroOptions(t *testing.T) {
+	findings := []finding.Finding{sqli("f1", finding.Confirmed), sqli("f2", finding.Unconfirmed)}
+
+	if got, want := Evaluate(sampleKey(), findings), EvaluateWith(sampleKey(), findings, Options{}); !reflect.DeepEqual(got, want) {
+		t.Fatalf("Evaluate = %+v, EvaluateWith = %+v", got, want)
+	}
+}
+
+func TestTextSaysWhenUnreviewedFindingsWereCounted(t *testing.T) {
+	findings := []finding.Finding{sqli("f1", finding.Confirmed)}
+
+	with := EvaluateWith(sampleKey(), findings, Options{CountUnreviewed: true}).Text()
+	without := Evaluate(sampleKey(), findings).Text()
+
+	if !strings.Contains(with, "were not reviewed") || strings.Contains(without, "were not reviewed") {
+		t.Fatalf("with:\n%s\nwithout:\n%s", with, without)
+	}
+}
+
+func TestShippedKeysParse(t *testing.T) {
+	for _, path := range []string{"../../bench/lab.json", "../../bench/labapp.json"} {
+		t.Run(path, func(t *testing.T) {
+			f, err := os.Open(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer f.Close()
+
+			if _, err := ParseKey(f); err != nil {
+				t.Fatal(err)
 			}
 		})
 	}
