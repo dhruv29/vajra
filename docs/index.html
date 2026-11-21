@@ -1,0 +1,265 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <!-- Nothing is loaded from anywhere else, and a run you open stays in this tab. -->
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; base-uri 'none'; form-action 'none'">
+  <meta name="referrer" content="no-referrer">
+  <meta name="color-scheme" content="dark">
+  <title>Vajra: security testing that tries to disprove every finding first</title>
+  <meta name="description" content="Vajra tests web apps, APIs and code you are authorised to test, then puts every result through evidence, scope, reproduction and review. What survives is a short list of proven findings, ranked by what an attacker could reach.">
+  <link rel="stylesheet" href="app.css?v=1">
+</head>
+<body>
+  <a class="skip-link" href="#run">Skip to the sample run</a>
+
+  <header class="topbar">
+    <div class="topbar-inner">
+      <a class="brand" href="#top" aria-label="Vajra, top of page">
+        <svg class="brand-mark" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+          <path d="M13.5 2 5 13.2h6L9.8 22 19 10.4h-6.2z" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/>
+        </svg>
+        <span>Vajra</span>
+      </a>
+      <nav class="topnav" aria-label="Main">
+        <a href="#run">Sample run</a>
+        <a href="#trail-heading">Verification trail</a>
+        <a href="#how">How it works</a>
+        <a class="topnav-cta" href="https://github.com/dhruv29/vajra" rel="noopener">GitHub</a>
+      </nav>
+    </div>
+  </header>
+
+  <main id="top">
+    <section class="hero" aria-labelledby="hero-heading">
+      <div class="hero-inner">
+        <div class="hero-copy">
+          <p class="eyebrow"><span class="eyebrow-dot" aria-hidden="true"></span>Open-source security testing for defenders</p>
+          <h1 id="hero-heading">Every finding has to <span class="hl">survive being disproved</span> before you see it.</h1>
+          <p class="hero-lede">
+            Vajra tests the web apps, APIs and code you are authorised to test, then tries to knock down
+            each result: is there evidence, is it in scope, does it reproduce, does it hold up under review?
+            A pile of candidates goes in. A short list of proven findings comes out, ranked by what an
+            attacker could reach, with everything it threw out and why.
+          </p>
+          <div class="command">
+            <span class="command-prompt" aria-hidden="true">$</span>
+            <code id="command-text">vajra scan -config run.json -data data</code>
+            <button id="copy" class="command-copy" type="button">Copy</button>
+          </div>
+          <div class="hero-actions">
+            <a class="btn btn-primary" href="#run">View the sample run</a>
+            <a class="btn btn-ghost" href="https://github.com/dhruv29/vajra" rel="noopener">Source on GitHub</a>
+          </div>
+          <ul class="facts" aria-label="Facts">
+            <li>Single Go binary, no third-party modules</li>
+            <li>Deny-by-default scope</li>
+            <li>AGPL-3.0</li>
+          </ul>
+        </div>
+
+        <figure class="pipe" aria-labelledby="pipe-caption">
+          <figcaption id="pipe-caption" class="pipe-caption">Every candidate, the same five gates</figcaption>
+          <ol class="pipe-steps">
+            <li class="pipe-step"><span class="pipe-n">01</span><strong>Candidate</strong><span class="pipe-sub">A scanner template, a built-in check, a code rule, an advisory or another tool&rsquo;s SARIF result.</span></li>
+            <li class="pipe-step"><span class="pipe-n">02</span><strong>Evidence</strong><span class="pipe-sub">The request and response, or the code it cites, must actually exist.</span></li>
+            <li class="pipe-step"><span class="pipe-n">03</span><strong>Scope</strong><span class="pipe-sub">Outside the allowed hosts and ports? Stopped, never re-tested.</span></li>
+            <li class="pipe-step"><span class="pipe-n">04</span><strong>Reproduce</strong><span class="pipe-sub">Sent again. It has to happen every time.</span></li>
+            <li class="pipe-step"><span class="pipe-n">05</span><strong>Refute</strong><span class="pipe-sub">A reviewer argues against it, with the evidence in hand.</span></li>
+          </ol>
+          <div class="pipe-out" aria-label="Verdicts">
+            <span class="verdict-chip" data-status="confirmed">confirmed</span>
+            <span class="verdict-chip" data-status="refuted">refuted</span>
+            <span class="verdict-chip" data-status="unconfirmed">unconfirmed</span>
+            <span class="verdict-chip" data-status="out_of_scope">out of scope</span>
+          </div>
+          <p class="pipe-foot">Each verdict keeps its reason. Nothing is silently dropped.</p>
+        </figure>
+      </div>
+    </section>
+
+    <section id="run" class="console" aria-labelledby="run-heading">
+      <header class="console-bar">
+        <div class="console-title">
+          <p class="crumb"><span>vajra run</span><span aria-hidden="true">/</span><span id="source-badge" class="badge">Sample</span><span id="run-id" class="crumb-id"></span></p>
+          <h2 id="run-heading">Loading</h2>
+        </div>
+        <div class="console-actions">
+          <label class="btn btn-small btn-primary" for="file">Open a saved run</label>
+          <input id="file" class="visually-hidden" type="file" accept="application/json,.json">
+          <button id="reset" class="btn btn-small btn-ghost" type="button" hidden>Back to the sample</button>
+        </div>
+      </header>
+      <p class="console-hint">A made-up shop, in the exact shape <code>vajra scan -data</code> saves. Open or drop one of your own saved runs anywhere on this page: it is read in this tab and sent nowhere.</p>
+      <p id="status" class="status" role="status" aria-live="polite"></p>
+
+      <div class="verdicts">
+        <p id="headline" class="headline"></p>
+        <svg id="funnel" class="funnel" viewBox="0 0 100 8" preserveAspectRatio="none" aria-hidden="true" focusable="false"></svg>
+        <dl id="tally" class="tiles" aria-label="Verdicts"></dl>
+      </div>
+
+      <section id="reach-map" class="panel reachmap" aria-labelledby="map-heading">
+        <header class="panel-head map-head">
+          <div>
+            <h3 id="map-heading">What an attacker could reach</h3>
+            <p id="map-note" class="panel-note"><span class="wide-only">Findings on the left, the asset each sits on, then what it reaches one, two and three steps away.</span> Pick a chain to walk it step by step, or a finding to see its blast radius. Reach comes from the run&rsquo;s asset graph and the topology you declare; the line says how sure it is.</p>
+          </div>
+          <ul class="map-legend" aria-label="Legend">
+            <li><span class="key key-proven" aria-hidden="true"></span>Proven: reproduced here</li>
+            <li><span class="key key-inferred" aria-hidden="true"></span>Inferred from the graph</li>
+            <li><span class="key key-assumed" aria-hidden="true"></span>Assumed: plausible, not shown</li>
+            <li><span class="key key-declared" aria-hidden="true"></span>Asset you declared</li>
+          </ul>
+        </header>
+        <div class="picker">
+          <div class="picker-group">
+            <p class="picker-label" id="chains-label">Attack chains</p>
+            <ul id="chain-picks" class="pick-list" aria-labelledby="chains-label"></ul>
+          </div>
+          <div class="picker-group">
+            <p class="picker-label" id="finds-label">Findings with a reach</p>
+            <ul id="finding-picks" class="pick-list" aria-labelledby="finds-label"></ul>
+          </div>
+        </div>
+        <div class="map-layout">
+          <div class="map-canvas" id="map-canvas"></div>
+          <div id="map-detail" class="map-detail" aria-live="polite"></div>
+        </div>
+        <p id="map-caps" class="panel-note map-caps"></p>
+        <div class="visually-hidden">
+          <h4>Reach map as text</h4>
+          <ul id="map-text"></ul>
+        </div>
+      </section>
+
+      <div class="console-grid">
+        <section class="panel queue" aria-labelledby="queue-heading">
+          <header class="panel-head">
+            <h3 id="queue-heading">Fix these first</h3>
+            <p class="panel-note">Confirmed findings, ranked by blast-radius score. The score is an ordering aid, not a measurement.</p>
+          </header>
+          <ol id="fixfirst" class="fix-list"></ol>
+        </section>
+        <section class="panel" aria-labelledby="gate-heading">
+          <header class="panel-head">
+            <h3 id="gate-heading">At the egress gate</h3>
+            <p class="panel-note">Every request the run made had to pass the gate. This is what it let through and what it refused.</p>
+          </header>
+          <div id="gate"></div>
+        </section>
+      </div>
+
+      <section id="trail" class="panel trail" aria-labelledby="trail-heading">
+        <header class="panel-head">
+          <h3 id="trail-heading">Verification trail</h3>
+          <p class="panel-note">Pick any finding and see each stage it went through, and the stage that decided it.</p>
+        </header>
+        <div class="trail-layout">
+          <div class="trail-pick">
+            <label class="select trail-select">
+              <span class="visually-hidden">Finding</span>
+              <select id="trail-select"></select>
+            </label>
+            <div id="trail-list" class="trail-list"></div>
+          </div>
+          <div id="trail-view" class="trail-view" aria-live="polite"></div>
+        </div>
+      </section>
+
+      <section class="panel inventory" aria-labelledby="findings-heading">
+        <header class="panel-head inventory-head">
+          <h3 id="findings-heading">All findings</h3>
+          <p id="shown" class="panel-note" aria-live="polite"></p>
+        </header>
+        <div class="toolbar">
+          <label class="search">
+            <span class="visually-hidden">Search findings</span>
+            <input id="query" type="search" placeholder="Search titles, targets, rules, evidence" autocomplete="off" spellcheck="false">
+          </label>
+          <div class="segmented" role="group" aria-label="Status">
+            <button type="button" class="seg" data-status="all" aria-pressed="true">All</button>
+            <button type="button" class="seg" data-status="confirmed" aria-pressed="false">Confirmed</button>
+            <button type="button" class="seg" data-status="unconfirmed" aria-pressed="false">Unconfirmed</button>
+            <button type="button" class="seg" data-status="refuted" aria-pressed="false">Refuted</button>
+            <button type="button" class="seg" data-status="out_of_scope" aria-pressed="false">Out of scope</button>
+          </div>
+          <label class="select">
+            <span class="visually-hidden">Severity</span>
+            <select id="severity">
+              <option value="any">Any severity</option>
+              <option value="high">High or worse</option>
+              <option value="critical">Critical only</option>
+            </select>
+          </label>
+          <label class="select">
+            <span class="visually-hidden">Kind</span>
+            <select id="kind">
+              <option value="any">Any kind</option>
+              <option value="dast">Live test</option>
+              <option value="sast">Code</option>
+              <option value="sca">Dependency</option>
+              <option value="net">Network</option>
+            </select>
+          </label>
+        </div>
+        <div id="findings" class="table-wrap"></div>
+      </section>
+
+      <section class="panel gaps" aria-labelledby="gaps-heading">
+        <header class="panel-head">
+          <h3 id="gaps-heading">What this run did, and did not do</h3>
+          <p class="panel-note">A gap is said out loud, so it is never read as a clean result.</p>
+        </header>
+        <div id="coverage" class="coverage"></div>
+      </section>
+    </section>
+
+    <section id="how" class="how" aria-labelledby="how-heading">
+      <div class="how-intro">
+        <p class="eyebrow">How it works</p>
+        <h2 id="how-heading">Built to be pointed at real systems without fear.</h2>
+        <p>It tests web apps and APIs, reads source code, secrets and dependency advisories, and checks other tools&rsquo; SARIF reports against your code. Results go to Markdown or HTML reports, a local web interface, GitHub or Jira tickets, and a CI gate.</p>
+        <p class="bench"><strong>6 of 6</strong> planted flaws found and <strong>0 of 6</strong> decoys reported in its own lab. That lab is small and was written by the same team that wrote the checks, so treat it as a regression check, not an independent benchmark. The AI reviewer has so far been tested only against a stand-in.</p>
+      </div>
+      <ol class="principles">
+        <li>
+          <h3>Deny by default</h3>
+          <p>No scope, no budget or no authorisation statement and the run does not start. Loopback, link-local and cloud-metadata addresses can never be targets, even if listed.</p>
+        </li>
+        <li>
+          <h3>One gate for every request</h3>
+          <p>Tools sit on a network with no route out. The only way through is the egress gate, which allows a connection only when the host, port and every resolved address are in scope, and logs each decision.</p>
+        </li>
+        <li>
+          <h3>A throwaway container per tool run</h3>
+          <p>Read-only root, no capabilities, no host environment, non-root, with memory, process and time limits. Vajra&rsquo;s own requests go through the same sandbox and gate.</p>
+        </li>
+        <li>
+          <h3>Hard budgets</h3>
+          <p>Model tokens, model turns, sandbox runs and wall-clock time are all capped. A run that is cut short exits with an error and is not saved as a clean result.</p>
+        </li>
+        <li>
+          <h3>Prove it, or say why not</h3>
+          <p>Evidence, scope, reproduction, review. Confirmed findings get a blast radius and attack chains; refuted and unconfirmed ones stay in the report with the reason.</p>
+        </li>
+      </ol>
+    </section>
+  </main>
+
+  <footer class="footer">
+    <div class="footer-inner">
+      <p class="footer-brand">Vajra</p>
+      <p>Open source under the GNU Affero General Public License, version 3. For testing systems you own or are authorised in writing to test. This page loads nothing from other sites.</p>
+      <a href="https://github.com/dhruv29/vajra" rel="noopener">github.com/dhruv29/vajra</a>
+    </div>
+  </footer>
+
+  <div id="drop" class="drop" hidden><p>Drop the run to read it here</p></div>
+
+  <script src="sample.js?v=1"></script>
+  <script src="map.js?v=1"></script>
+  <script src="app.js?v=1"></script>
+</body>
+</html>
