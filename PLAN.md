@@ -106,9 +106,9 @@ The gates and the verification pipeline. Nothing else is safe to build first.
 
 | Loop | Delivers | State |
 |---|---|---|
-| 1 | Scope policy, egress proxy, sandbox runner, budgets, finding model, verification pipeline, nuclei adapter, LLM refuter, CLI | in progress |
-| 2 | Store, asset graph, blast-radius engine, report generator, HTTP API | planned |
-| 3 | Web UI: runs, findings triage, blast-radius graph, run reach, report export | planned |
+| 1 | Scope policy, egress proxy, sandbox runner, budgets, finding model, verification pipeline, nuclei adapter, LLM refuter, CLI | done |
+| 2 | Run store, asset graph, blast-radius engine, Markdown and HTML reports, run reach from the gate audit log | done |
+| 3 | HTTP API and web UI: runs, findings triage, blast-radius graph, run reach, report export | next |
 
 ### Phase 2: full coverage of an application
 

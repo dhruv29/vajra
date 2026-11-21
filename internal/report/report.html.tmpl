@@ -1,0 +1,157 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'">
+<title>Security test report {{.Run.ID}}</title>
+<style>
+:root {
+  --ink: #16181d; --muted: #5d6470; --rule: #d9dce2; --paper: #fbfaf7; --panel: #ffffff;
+  --confirmed: #b3261e; --unconfirmed: #9a6700; --refuted: #4f5b66; --out: #6b5b95;
+  --proven: #b3261e; --inferred: #9a6700; --assumed: #5d6470;
+  --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  --serif: "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, serif;
+  --sans: "Avenir Next", "Segoe UI", system-ui, sans-serif;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--paper); color: var(--ink); font: 16px/1.55 var(--sans); }
+main { max-width: 62rem; margin: 0 auto; padding: 3rem 1.5rem 5rem; }
+h1 { font: 600 2.6rem/1.1 var(--serif); margin: 0 0 .4rem; letter-spacing: -.01em; }
+h2 { font: 600 1.5rem/1.2 var(--serif); margin: 3.2rem 0 1rem; padding-top: 1rem; border-top: 2px solid var(--ink); }
+h3 { font: 600 1.2rem/1.3 var(--serif); margin: 0 0 .5rem; }
+.eyebrow { font: 600 .72rem/1 var(--sans); letter-spacing: .14em; text-transform: uppercase; color: var(--muted); }
+.meta { display: grid; grid-template-columns: max-content 1fr; gap: .3rem 1.2rem; margin: 1.6rem 0 0; font-size: .92rem; }
+.meta dt { color: var(--muted); } .meta dd { margin: 0; overflow-wrap: anywhere; }
+.counts { display: grid; grid-template-columns: 2fr 1fr 1fr 1fr; gap: 0; margin-top: 2.4rem; border: 1px solid var(--ink); background: var(--panel); }
+.count { padding: 1.1rem 1.2rem; border-left: 1px solid var(--rule); }
+.count:first-child { border-left: 0; }
+.count b { display: block; font: 600 2.8rem/1 var(--serif); }
+.count:first-child b { font-size: 4.2rem; color: var(--confirmed); }
+.count span { font-size: .8rem; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
+.finding { background: var(--panel); border: 1px solid var(--rule); border-left: 6px solid var(--muted); margin: 0 0 1.6rem; padding: 1.4rem 1.5rem; break-inside: avoid; }
+.finding.confirmed { border-left-color: var(--confirmed); } .finding.unconfirmed { border-left-color: var(--unconfirmed); }
+.head { display: flex; gap: 1.2rem; align-items: flex-start; justify-content: space-between; }
+.score { text-align: right; flex: none; } .score b { font: 600 2.2rem/1 var(--serif); display: block; }
+.score span { font-size: .7rem; letter-spacing: .1em; text-transform: uppercase; color: var(--muted); }
+.tags { display: flex; flex-wrap: wrap; gap: .4rem; margin: .2rem 0 .9rem; }
+.tag { font: 600 .7rem/1 var(--sans); letter-spacing: .08em; text-transform: uppercase; padding: .32rem .5rem; border: 1px solid currentColor; }
+.tag.confirmed { color: var(--confirmed); } .tag.unconfirmed { color: var(--unconfirmed); }
+.tag.refuted { color: var(--refuted); } .tag.out_of_scope { color: var(--out); }
+.where { font: .86rem/1.4 var(--mono); overflow-wrap: anywhere; color: var(--muted); }
+table { width: 100%; border-collapse: collapse; font-size: .9rem; margin: .8rem 0; }
+th { text-align: left; font: 600 .7rem/1 var(--sans); letter-spacing: .1em; text-transform: uppercase; color: var(--muted); padding: .5rem .6rem; border-bottom: 1px solid var(--ink); }
+td { padding: .5rem .6rem; border-bottom: 1px solid var(--rule); vertical-align: top; overflow-wrap: anywhere; }
+.depth-1 td:first-child { padding-left: 1.6rem; } .depth-2 td:first-child { padding-left: 2.6rem; } .depth-3 td:first-child { padding-left: 3.6rem; }
+.conf { font: 600 .7rem/1 var(--sans); letter-spacing: .08em; text-transform: uppercase; }
+.conf.proven { color: var(--proven); } .conf.inferred { color: var(--inferred); } .conf.assumed { color: var(--assumed); }
+.steps { list-style: none; margin: .6rem 0; padding: 0; }
+.steps li { padding: .35rem 0 .35rem 1.3rem; position: relative; font-size: .92rem; }
+.steps li::before { content: ""; position: absolute; left: 0; top: .78rem; width: .55rem; height: .55rem; border-radius: 50%; background: var(--muted); }
+.steps li.pass::before { background: #1a7f37; } .steps li.fail::before { background: var(--confirmed); } .steps li.inconclusive::before { background: var(--unconfirmed); }
+details { margin-top: .7rem; } summary { cursor: pointer; font-weight: 600; font-size: .9rem; }
+pre { font: .8rem/1.45 var(--mono); background: #f1efe9; border: 1px solid var(--rule); padding: .8rem; overflow-x: auto; white-space: pre-wrap; overflow-wrap: anywhere; margin: .5rem 0 0; }
+.note { color: var(--muted); font-size: .92rem; }
+@media (max-width: 40rem) { .counts { grid-template-columns: 1fr 1fr; } .count { border-left: 0; border-top: 1px solid var(--rule); } h1 { font-size: 2rem; } .head { flex-direction: column; } .score { text-align: left; } }
+@media print { body { background: #fff; } main { padding: 0; } details { display: block; } summary { display: none; } }
+</style>
+</head>
+<body>
+<main>
+<header>
+  <p class="eyebrow">Vajra security test report</p>
+  <h1>{{len .Attention}} finding{{if ne (len .Attention) 1}}s need{{else}} needs{{end}} attention</h1>
+  <dl class="meta">
+    <dt>Run</dt><dd>{{.Run.ID}}</dd>
+    <dt>Generated</dt><dd>{{.Run.Report.GeneratedAt.Format "2006-01-02 15:04 MST"}}</dd>
+    <dt>Operator</dt><dd>{{.Run.Report.Authorization.Operator}}</dd>
+    <dt>Authorisation</dt><dd>{{.Run.Report.Authorization.Statement}}</dd>
+    <dt>Targets</dt><dd>{{range $i, $t := .Run.Report.Targets}}{{if $i}}, {{end}}{{$t}}{{end}}</dd>
+  </dl>
+  <section class="counts" aria-label="Findings by status">
+    {{range .Counts}}<div class="count"><b>{{.N}}</b><span>{{label .Status}}</span></div>{{end}}
+  </section>
+</header>
+
+<section aria-labelledby="attention">
+<h2 id="attention">Findings that need attention</h2>
+{{if not .Attention}}<p class="note">Nothing was confirmed or left undecided in this run.</p>{{end}}
+{{range .Attention}}
+<article class="finding {{.Finding.Status}}">
+  <div class="head">
+    <div>
+      <div class="tags">
+        <span class="tag {{.Finding.Status}}">{{label .Finding.Status}}</span>
+        <span class="tag">{{.Finding.Severity}}</span>
+        <span class="tag">{{label .Radius.Capability}}</span>
+      </div>
+      <h3>{{.Finding.Title}}</h3>
+      <div class="where">{{.Finding.Target}}</div>
+    </div>
+    <div class="score"><b>{{.Radius.Score}}</b><span>blast radius / 100</span></div>
+  </div>
+  <p>{{.Radius.Summary}} <span class="note">Classified from {{.Radius.CapabilityBasis}}.</span></p>
+  {{if gt (len .Radius.Reach) 1}}
+  <table>
+    <thead><tr><th>Reachable asset</th><th>Kind</th><th>Confidence</th><th>Why</th></tr></thead>
+    <tbody>
+    {{range .Radius.Reach}}<tr class="depth-{{.Depth}}"><td>{{.Name}}</td><td>{{.Kind}}</td><td><span class="conf {{.Confidence}}">{{.Confidence}}</span></td><td>{{.Why}}</td></tr>{{end}}
+    </tbody>
+  </table>
+  {{end}}
+  <ul class="steps" aria-label="Verification steps">
+    {{range .Finding.Verdicts}}<li class="{{.Outcome}}"><strong>{{.Stage}}</strong>: {{.Outcome}}. {{.Reason}}</li>{{end}}
+  </ul>
+  {{if .Request}}<details><summary>Request</summary><pre>{{.Request}}</pre></details>{{end}}
+  {{if .Response}}<details><summary>Response</summary><pre>{{.Response}}</pre></details>{{end}}
+</article>
+{{end}}
+</section>
+
+<section aria-labelledby="dismissed">
+<h2 id="dismissed">Dismissed results</h2>
+{{if not .Dismissed}}<p class="note">No scanner result was refuted or out of scope.</p>{{else}}
+<table>
+  <thead><tr><th>Result</th><th>Target</th><th>Status</th><th>Why</th></tr></thead>
+  <tbody>
+  {{range .Dismissed}}<tr><td>{{.Finding.Title}}</td><td>{{.Finding.Target}}</td><td><span class="tag {{.Finding.Status}}">{{label .Finding.Status}}</span></td><td>{{with .Finding.Verdicts}}{{(index . (len (slice . 1))).Reason}}{{end}}</td></tr>{{end}}
+  </tbody>
+</table>
+{{end}}
+</section>
+
+<section aria-labelledby="appendix">
+<h2 id="appendix">Appendix</h2>
+<h3>Scope</h3>
+<dl class="meta">
+  <dt>Hosts</dt><dd>{{range $i, $h := .Run.Report.Scope.Hosts}}{{if $i}}, {{end}}{{$h}}{{else}}none{{end}}</dd>
+  <dt>CIDRs</dt><dd>{{range $i, $c := .Run.Report.Scope.CIDRs}}{{if $i}}, {{end}}{{$c}}{{else}}none{{end}}</dd>
+  <dt>Ports</dt><dd>{{range $i, $p := .Run.Report.Scope.Ports}}{{if $i}}, {{end}}{{$p}}{{else}}80, 443{{end}}</dd>
+</dl>
+<h3 style="margin-top:1.8rem">Budget</h3>
+<table>
+  <thead><tr><th>Resource</th><th>Used</th><th>Limit</th></tr></thead>
+  <tbody>
+  <tr><td>Model tokens</td><td>{{.Run.Report.Budget.Usage.Tokens}}</td><td>{{.Run.Report.Budget.Limits.Tokens}}</td></tr>
+  <tr><td>Model turns</td><td>{{.Run.Report.Budget.Usage.Turns}}</td><td>{{.Run.Report.Budget.Limits.Turns}}</td></tr>
+  <tr><td>Sandbox runs</td><td>{{.Run.Report.Budget.Usage.SandboxRuns}}</td><td>{{.Run.Report.Budget.Limits.SandboxRuns}}</td></tr>
+  <tr><td>Time</td><td>{{seconds .Run.Report.Budget.Usage.Elapsed}}</td><td>{{.Run.Report.Budget.Limits.DurationSeconds}}s</td></tr>
+  </tbody>
+</table>
+<h3 style="margin-top:1.8rem">What the run touched</h3>
+{{with .Run.Reach}}
+<p>{{.AllowedTotal}} connection(s) allowed, {{.DeniedTotal}} refused.</p>
+{{if or .Allowed .Denied}}
+<table>
+  <thead><tr><th>Target</th><th>Decision</th><th>Count</th><th>Reason</th></tr></thead>
+  <tbody>
+  {{range .Allowed}}<tr><td>{{.Target}}</td><td>allowed</td><td>{{.Count}}</td><td></td></tr>{{end}}
+  {{range .Denied}}<tr><td>{{.Target}}</td><td>refused</td><td>{{.Count}}</td><td>{{.Reason}}</td></tr>{{end}}
+  </tbody>
+</table>
+{{end}}
+{{else}}<p class="note">No gate audit log was supplied for this run.</p>{{end}}
+</section>
+</main>
+</body>
+</html>

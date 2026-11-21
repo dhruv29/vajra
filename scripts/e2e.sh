@@ -6,7 +6,10 @@
 #   1. the exposed file is found and reproduced,
 #   2. a task container has no direct route out,
 #   3. the gate refuses an out-of-scope host,
-#   4. the gate wrote an audit log.
+#   4. the gate wrote an audit log,
+#   5. the saved run renders as reports with a blast radius.
+#
+# Set E2E_KEEP=/some/dir to keep the generated reports.
 #
 # Everything it creates is prefixed vajra-e2e and removed on exit.
 set -euo pipefail
@@ -60,15 +63,27 @@ cat > "$WORK/run.json" <<EOF
   "targets": ["http://target"],
   "sandbox": {"network": "$TASK_NET", "proxy_url": "http://gate:3128"},
   "nuclei": {"image": "vajra-nuclei:local", "templates_dir": "/opt/nuclei-templates/http/exposures/configs/git-config.yaml", "timeout_seconds": 300},
-  "refuter": {"provider": "none"}
+  "refuter": {"provider": "none"},
+  "topology": {
+    "assets": [
+      {"id": "lab-repo", "kind": "datastore", "name": "Source repository", "data_classes": ["source-code", "secrets"]},
+      {"id": "lab-db", "kind": "datastore", "name": "Lab database", "data_classes": ["pii"]}
+    ],
+    "links": [
+      {"from": "target", "to": "lab-repo", "relation": "reads"},
+      {"from": "target", "to": "lab-db", "relation": "reads"}
+    ]
+  }
 }
 EOF
 chmod a+r "$WORK/run.json"
+mkdir -p "$WORK/audit" && chmod 777 "$WORK/audit"
 
 docker create --name "$GATE" --network "$TASK_NET" --network-alias gate \
   --read-only --cap-drop ALL --security-opt no-new-privileges \
   -v "$WORK/run.json:/etc/vajra/run.json:ro" \
-  vajra:local gate -config /etc/vajra/run.json -listen :3128 >/dev/null
+  -v "$WORK/audit:/var/log/vajra" \
+  vajra:local gate -config /etc/vajra/run.json -listen :3128 -audit /var/log/vajra/audit.jsonl >/dev/null
 docker network connect "$LAB_NET" "$GATE"
 docker network connect "$OUT_NET" "$GATE"
 docker start "$GATE" >/dev/null
@@ -100,16 +115,30 @@ echo "$allowed" | grep -q "lab" || fail "the gate did not forward an in-scope re
 pass "gate forwards an in-scope request"
 
 echo "== scan"
-"$WORK/vajra" scan -config "$WORK/run.json" -out "$WORK/report.json"
+"$WORK/vajra" scan -config "$WORK/run.json" -out "$WORK/report.json" -data "$WORK/data" -gate-audit "$WORK/audit/audit.jsonl"
 grep -q '"rule_id": "git-config"' "$WORK/report.json" || fail "the exposed .git/config was not reported: $(cat "$WORK/report.json")"
 grep -q '"reason": "reproduced 2 of 2 times"' "$WORK/report.json" || fail "the finding was not reproduced: $(cat "$WORK/report.json")"
 grep -q '"status": "unconfirmed"' "$WORK/report.json" || fail "with no refuter the finding must be unconfirmed"
 pass "scan found the exposure, reproduced it twice, and left it unconfirmed without a reviewer"
 
 echo "== audit"
-audit="$(docker logs "$GATE" 2>&1)"
+audit="$(cat "$WORK/audit/audit.jsonl")"
 echo "$audit" | grep -q '"target":"example.com:80","allowed":false' || fail "the denial is missing from the audit log"
 echo "$audit" | grep -q '"target":"target:80","allowed":true' || fail "the allowed requests are missing from the audit log"
 pass "audit log records allowed and denied connections"
+
+echo "== saved run and reports"
+run_id="$("$WORK/vajra" runs -data "$WORK/data" | awk 'NR==2 {print $1}')"
+[ -n "$run_id" ] || fail "the run was not saved"
+"$WORK/vajra" report -data "$WORK/data" -run "$run_id" -format html -out "$WORK/report.html"
+"$WORK/vajra" report -data "$WORK/data" -run "$run_id" -format md -out "$WORK/report.md"
+grep -q "Blast radius score:" "$WORK/report.md" || fail "the Markdown report is missing the blast radius"
+grep -q "refused" "$WORK/report.md" || fail "the report does not show what the gate refused"
+grep -q "blast radius / 100" "$WORK/report.html" || fail "the HTML report is missing the blast radius"
+pass "run $run_id saved; HTML and Markdown reports show the blast radius and the run's reach"
+if [ -n "${E2E_KEEP:-}" ]; then
+  mkdir -p "$E2E_KEEP" && cp "$WORK/report.html" "$WORK/report.md" "$WORK/report.json" "$E2E_KEEP/"
+  echo "reports kept in $E2E_KEEP"
+fi
 
 echo "ALL CHECKS PASSED"

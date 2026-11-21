@@ -134,7 +134,8 @@ type Refuter interface {
 	Refute(ctx context.Context, f finding.Finding) (Refutation, error)
 }
 
-// RefuteStage asks an independent reviewer to disprove the finding.
+// RefuteStage asks an independent reviewer to disprove the finding. Budget is
+// nil only when the reviewer makes no model call.
 type RefuteStage struct {
 	Refuter Refuter
 	Budget  *budget.Budget
@@ -144,8 +145,10 @@ func (RefuteStage) Name() string               { return "refute" }
 func (RefuteStage) FailStatus() finding.Status { return finding.Refuted }
 
 func (s RefuteStage) Check(ctx context.Context, f finding.Finding) (finding.Outcome, string) {
-	if err := s.Budget.SpendTurn(); err != nil {
-		return finding.Inconclusive, err.Error()
+	if s.Budget != nil {
+		if err := s.Budget.SpendTurn(); err != nil {
+			return finding.Inconclusive, err.Error()
+		}
 	}
 	r, err := s.Refuter.Refute(ctx, f)
 	if err != nil {

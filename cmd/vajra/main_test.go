@@ -149,3 +149,55 @@ func TestGateStartsAuditsToAFileAndStopsOnCancel(t *testing.T) {
 		t.Fatalf("bad listen address: code = %d", code)
 	}
 }
+
+func TestSavedRunsCanBeListedAndRendered(t *testing.T) {
+	cfg := writeFile(t, "run.json", validConfig)
+	in := writeFile(t, "out.jsonl", `{"template-id":"x","matched-at":"https://elsewhere.test/a","request":"r","response":"s"}`+"\n")
+	audit := writeFile(t, "audit.jsonl", `{"method":"GET","target":"app.test:443","allowed":true}`+"\n")
+	data := t.TempDir()
+
+	if code, stdout, _ := invoke("runs", "-data", data); code != exitOK || !strings.Contains(stdout, "no saved runs") {
+		t.Fatalf("empty list: code = %d, stdout = %q", code, stdout)
+	}
+	code, stdout, stderr := invoke("verify", "-config", cfg, "-in", in, "-data", data, "-gate-audit", audit)
+	if code != exitOK || stdout != "" || !strings.Contains(stderr, "saved run ") {
+		t.Fatalf("code = %d, stdout = %q, stderr = %q", code, stdout, stderr)
+	}
+	id := strings.TrimSpace(strings.SplitN(strings.SplitN(stderr, "saved run ", 2)[1], "\n", 2)[0])
+
+	code, stdout, _ = invoke("runs", "-data", data)
+	if code != exitOK || !strings.Contains(stdout, id) || !strings.Contains(stdout, "https://app.test") {
+		t.Fatalf("list: code = %d, stdout = %q", code, stdout)
+	}
+	for format, want := range map[string]string{"html": "<!doctype html>", "md": "| out of scope | 1 |", "json": `"reach"`} {
+		code, stdout, stderr := invoke("report", "-data", data, "-run", id, "-format", format)
+		if code != exitOK || !strings.Contains(stdout, want) {
+			t.Errorf("%s: code = %d, stderr = %q, missing %q", format, code, stderr, want)
+		}
+	}
+	out := filepath.Join(t.TempDir(), "report.html")
+	if code, _, _ := invoke("report", "-data", data, "-run", id, "-out", out); code != exitOK {
+		t.Fatalf("report -out: code = %d", code)
+	}
+	if info, err := os.Stat(out); err != nil || info.Mode().Perm() != 0o600 || info.Size() == 0 {
+		t.Fatalf("report file: %v, %v", info, err)
+	}
+}
+
+func TestReportAndRunsUsageErrors(t *testing.T) {
+	cfg := writeFile(t, "run.json", validConfig)
+	data := t.TempDir()
+	cases := map[string][]string{
+		"runs without data":    {"runs"},
+		"report without run":   {"report", "-data", data},
+		"report unknown run":   {"report", "-data", data, "-run", "20261121-195440-0a1b2c3d"},
+		"report malformed run": {"report", "-data", data, "-run", "../../etc/passwd"},
+		"audit without data":   {"verify", "-config", cfg, "-in", cfg, "-gate-audit", cfg},
+		"missing audit file":   {"verify", "-config", cfg, "-in", writeFile(t, "e.jsonl", ""), "-data", data, "-gate-audit", "/nonexistent/audit"},
+	}
+	for name, args := range cases {
+		if code, _, stderr := invoke(args...); code == exitOK || stderr == "" {
+			t.Errorf("%s: code = %d, stderr = %q", name, code, stderr)
+		}
+	}
+}

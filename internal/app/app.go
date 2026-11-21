@@ -4,6 +4,7 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -19,8 +20,10 @@ import (
 	"github.com/dhruv29/vajra/internal/nuclei"
 	"github.com/dhruv29/vajra/internal/record"
 	"github.com/dhruv29/vajra/internal/refute"
+	"github.com/dhruv29/vajra/internal/report"
 	"github.com/dhruv29/vajra/internal/sandbox"
 	"github.com/dhruv29/vajra/internal/scope"
+	"github.com/dhruv29/vajra/internal/store"
 	"github.com/dhruv29/vajra/internal/verify"
 )
 
@@ -74,11 +77,15 @@ func assemble(cfg config.Config, policy *scope.Policy, deps Deps) (*run, error) 
 	if err != nil {
 		return nil, err
 	}
+	refuteBudget := b
+	if cfg.Refuter.Provider == config.RefuterNone {
+		refuteBudget = nil // no model call is made, so no turn is charged
+	}
 	pipeline, err := verify.NewPipeline(deps.Now,
 		verify.EvidenceStage{},
 		verify.ScopeStage{Policy: policy},
 		verify.ReproduceStage{Reproducer: scanner, Attempts: cfg.Verify.ReproduceAttempts, Budget: b},
-		verify.RefuteStage{Refuter: refuter, Budget: b},
+		verify.RefuteStage{Refuter: refuter, Budget: refuteBudget},
 	)
 	if err != nil {
 		return nil, err
@@ -206,5 +213,51 @@ func ServeGate(ctx context.Context, policy *scope.Policy, listener net.Listener,
 			return server.Close()
 		}
 		return nil
+	}
+}
+
+// Record turns a report into a stored run: it derives the asset graph and the
+// blast radius of each finding, summarises the gate's audit log when one is
+// given, and saves the result under dataDir. audit may be nil.
+func Record(report Report, cfg config.Config, audit io.Reader, dataDir string, now time.Time) (record.Run, error) {
+	st, err := store.Open(dataDir)
+	if err != nil {
+		return record.Run{}, err
+	}
+	var events []egress.Event
+	if audit != nil {
+		if events, err = egress.ReadEvents(audit); err != nil {
+			return record.Run{}, err
+		}
+	}
+	id, err := store.NewID(now)
+	if err != nil {
+		return record.Run{}, err
+	}
+	run, err := record.Build(id, report, cfg.Topology, events)
+	if err != nil {
+		return record.Run{}, err
+	}
+	if err := st.Save(run); err != nil {
+		return record.Run{}, err
+	}
+	return run, nil
+}
+
+// Render formats a stored run as "json", "md" or "html".
+func Render(run record.Run, format string) ([]byte, error) {
+	switch format {
+	case "json":
+		raw, err := json.MarshalIndent(run, "", "  ")
+		if err != nil {
+			return nil, fmt.Errorf("app: encode run: %w", err)
+		}
+		return append(raw, '\n'), nil
+	case "md":
+		return []byte(report.Markdown(run)), nil
+	case "html":
+		return report.HTML(run)
+	default:
+		return nil, fmt.Errorf("app: unknown report format %q: use json, md or html", format)
 	}
 }

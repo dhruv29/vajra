@@ -19,6 +19,7 @@ import (
 	"github.com/dhruv29/vajra/internal/finding"
 	"github.com/dhruv29/vajra/internal/sandbox"
 	"github.com/dhruv29/vajra/internal/scope"
+	"github.com/dhruv29/vajra/internal/store"
 )
 
 const baseConfig = `{
@@ -185,6 +186,9 @@ func TestWithoutARefuterNothingIsConfirmed(t *testing.T) {
 	if got := statusByRule(report)["real-issue"]; got != finding.Unconfirmed {
 		t.Fatalf("status = %s; a reproduced but unreviewed finding must be unconfirmed", got)
 	}
+	if report.Budget.Usage.Turns != 0 {
+		t.Fatalf("model turns = %d; none is made without a refuter", report.Budget.Usage.Turns)
+	}
 }
 
 func TestVerifyOutputChecksSavedScannerOutput(t *testing.T) {
@@ -307,4 +311,52 @@ func (s *syncBuffer) String() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.buf.String()
+}
+
+func TestRecordSavesARunWithGraphRadiiAndReach(t *testing.T) {
+	cfg, policy := loadConfig(t, "anthropic")
+	runner := &scriptedRunner{
+		scanOutput:   line("real-issue", "high", "https://app.test/b"),
+		reproducible: map[string]bool{"real-issue": true},
+	}
+	rep, err := Scan(context.Background(), cfg, policy, testDeps(runner, refuterServer(t).URL))
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	audit := strings.NewReader(`{"method":"GET","target":"app.test:443","allowed":true}` + "\n")
+
+	run, err := Record(rep, cfg, audit, dir, time.Unix(1_700_000_000, 0))
+
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(run.Radii) != 1 || run.Radii[0].Score == 0 || run.Reach == nil || run.Reach.AllowedTotal != 1 {
+		t.Fatalf("run = %+v", run)
+	}
+	st, _ := store.Open(dir)
+	saved, err := st.Get(run.ID)
+	if err != nil || saved.Report.Findings[0].RuleID != "real-issue" {
+		t.Fatalf("saved = %+v, err = %v", saved, err)
+	}
+	for format, want := range map[string]string{"json": `"radii"`, "md": "# Security test report", "html": "<!doctype html>"} {
+		out, err := Render(saved, format)
+		if err != nil || !strings.Contains(string(out), want) {
+			t.Errorf("Render(%s): err = %v, missing %q", format, err, want)
+		}
+	}
+	if _, err := Render(saved, "pdf"); err == nil {
+		t.Error("an unknown format was accepted")
+	}
+}
+
+func TestRecordWithoutAnAuditLogAndWithABadDirectory(t *testing.T) {
+	cfg, _ := loadConfig(t, "none")
+	run, err := Record(Report{Summary: map[finding.Status]int{}}, cfg, nil, t.TempDir(), time.Unix(1_700_000_000, 0))
+	if err != nil || run.Reach != nil {
+		t.Fatalf("run = %+v, err = %v", run, err)
+	}
+	if _, err := Record(Report{}, cfg, nil, "", time.Now()); err == nil {
+		t.Fatal("an empty data directory was accepted")
+	}
 }

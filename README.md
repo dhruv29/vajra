@@ -7,9 +7,9 @@ to disprove every result before it reports one. A finding is `confirmed` only
 after it was reproduced and survived an independent review. The aim is a short
 list of true issues with evidence, not thousands of alerts.
 
-> Status: early. The gated core and the verification pipeline exist and are
-> unit-tested. The web UI, blast-radius view and report formats are planned;
-> see [PLAN.md](PLAN.md).
+> Status: early. The gated core, verification pipeline, blast-radius engine
+> and reports work and are tested, including an end-to-end run against a lab
+> target. The web UI is next; see [PLAN.md](PLAN.md).
 
 ## How it works
 
@@ -50,12 +50,21 @@ cp examples/run.json run.local.json      # then edit it
 
 # 3. Build the scanner image and start the egress gate
 docker build -t vajra-nuclei:local -f deploy/nuclei.Dockerfile deploy
-VAJRA_CONFIG="$PWD/run.local.json" docker compose -f deploy/docker-compose.yml up -d --build
+mkdir -p data/audit && chmod 777 data/audit   # the gate writes its audit log here
+VAJRA_CONFIG="$PWD/run.local.json" VAJRA_AUDIT_DIR="$PWD/data/audit" \
+  docker compose -f deploy/docker-compose.yml up -d --build
 
-# 4. Scan and verify
+# 4. Scan, verify and save the run
 export ANTHROPIC_API_KEY=...             # only if refuter.provider is "anthropic"
-./vajra scan -config run.local.json -out report.json
+./vajra scan -config run.local.json -data data -gate-audit data/audit/audit.jsonl
+
+# 5. Read the report
+./vajra runs -data data
+./vajra report -data data -run RUN_ID -format html -out report.html
 ```
+
+`scripts/e2e.sh` does all of this against a throwaway lab target and checks
+the result.
 
 Restart the gate after changing the scope: it reads the configuration once at
 start.
@@ -67,10 +76,17 @@ start.
 | `vajra scan -config FILE` | Scan the configured targets, then verify each result |
 | `vajra verify -config FILE -in OUTPUT.jsonl` | Verify nuclei JSONL output saved earlier |
 | `vajra gate -config FILE` | Run the egress gate (normally started by Docker Compose) |
+| `vajra runs -data DIR` | List saved runs |
+| `vajra report -data DIR -run ID` | Render a saved run as `html`, `md` or `json` |
 
-`-out FILE` writes the report to a file (mode 0600) instead of standard output.
-`-fail-on-confirmed` exits with status 3 when any finding is confirmed, for use
-in CI.
+Flags for `scan` and `verify`:
+
+- `-out FILE` writes the findings report to a file (mode 0600).
+- `-data DIR` saves the run, with its asset graph and blast radii.
+- `-gate-audit FILE` adds the gate's audit log, so the report shows what the
+  run touched and what it was refused.
+- `-fail-on-confirmed` exits with status 3 when any finding is confirmed, for
+  use in CI.
 
 ## Configuration
 
@@ -87,6 +103,7 @@ See [examples/run.json](examples/run.json). Every section is required except
 | `nuclei` | Scanner image, template directory, timeout and request rate. |
 | `verify` | `reproduce_attempts` (default 2, maximum 5). |
 | `refuter` | `provider` is `anthropic` or `none`. With `none`, nothing can be confirmed. |
+| `topology` | Optional. What the targets connect to; feeds the blast radius. |
 
 Scope rules worth knowing:
 
@@ -95,6 +112,35 @@ Scope rules worth knowing:
 - Private addresses are allowed only when a listed CIDR covers them.
 - An IP-literal target must fall inside a listed CIDR.
 - The API key is read from an environment variable and never from the file.
+
+## Blast radius
+
+Each finding gets a score from 0 to 100 and a list of what an attacker could
+reach from it. The reach depends on the kind of vulnerability: code execution
+spreads to the host, its other services and everything the service can read;
+SQL injection reaches the data stores the service reads; cross-site scripting
+stays where it is.
+
+Vajra can see hosts, services and endpoints for itself. It cannot see what sits
+behind them, so you declare that in `topology`:
+
+```json
+"topology": {
+  "assets": [
+    {"id": "orders-db", "kind": "datastore", "name": "Orders database", "data_classes": ["pii", "payment"]}
+  ],
+  "links": [
+    {"from": "app.example.com", "to": "orders-db", "relation": "reads"}
+  ]
+}
+```
+
+Asset kinds: `host`, `service`, `datastore`, `identity`, `external`.
+Relations: `reads`, `calls`, `authenticates_with`, `hosts`.
+
+Every reachable asset carries a confidence: `proven` (the run demonstrated
+it), `inferred` (follows from the vulnerability class) or `assumed` (plausible,
+unchecked). The score is an ordering aid, not a measurement.
 
 ## Finding statuses
 

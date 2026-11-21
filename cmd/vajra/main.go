@@ -11,12 +11,15 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
+	"time"
 
 	"github.com/dhruv29/vajra/internal/app"
 	"github.com/dhruv29/vajra/internal/config"
 	"github.com/dhruv29/vajra/internal/finding"
 	"github.com/dhruv29/vajra/internal/sandbox"
+	"github.com/dhruv29/vajra/internal/store"
 )
 
 const (
@@ -32,13 +35,20 @@ const (
 const usage = `vajra: security testing that proves its findings
 
 Usage:
-  vajra scan   -config run.json [-out report.json] [-fail-on-confirmed]
-  vajra verify -config run.json -in nuclei.jsonl [-out report.json] [-fail-on-confirmed]
+  vajra scan   -config run.json [-out report.json] [-data DIR] [-gate-audit FILE] [-fail-on-confirmed]
+  vajra verify -config run.json -in nuclei.jsonl [-out report.json] [-data DIR] [-gate-audit FILE] [-fail-on-confirmed]
   vajra gate   -config run.json [-listen :3128] [-audit audit.jsonl]
+  vajra runs   -data DIR
+  vajra report -data DIR -run ID [-format html|md|json] [-out FILE]
 
   scan    run the scanner against the configured targets, then verify each result
   verify  verify scanner output saved earlier
   gate    run the egress proxy that enforces the scope for task containers
+  runs    list the runs saved in a data directory
+  report  render a saved run, with the blast radius of each finding
+
+With -data, scan and verify also save the run so that it can be reported on.
+-gate-audit adds the gate's audit log, which shows what the run touched.
 `
 
 func main() {
@@ -59,6 +69,10 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		code, err = runReport(ctx, args[0], args[1:], stdout, stderr)
 	case "gate":
 		err = runGate(ctx, args[1:], stderr)
+	case "runs":
+		err = runList(args[1:], stdout, stderr)
+	case "report":
+		err = runRender(args[1:], stdout, stderr)
 	case "help", "-h", "--help":
 		fmt.Fprint(stdout, usage)
 	default:
@@ -82,8 +96,13 @@ func runReport(ctx context.Context, command string, args []string, stdout, stder
 	inPath := flags.String("in", "", "scanner output to verify (verify only)")
 	outPath := flags.String("out", "", "write the report here instead of standard output")
 	failOnConfirmed := flags.Bool("fail-on-confirmed", false, "exit with status 3 when any finding is confirmed")
+	dataDir := flags.String("data", "", "also save the run in this data directory")
+	gateAudit := flags.String("gate-audit", "", "the gate's audit log, to record what the run touched (needs -data)")
 	if err := flags.Parse(args); err != nil {
 		return exitUsage, err
+	}
+	if *gateAudit != "" && *dataDir == "" {
+		return exitUsage, errors.New("-gate-audit needs -data")
 	}
 	if *configPath == "" {
 		return exitUsage, errors.New("-config is required")
@@ -115,8 +134,17 @@ func runReport(ctx context.Context, command string, args []string, stdout, stder
 		}
 	}
 
-	if err := writeReport(report, *outPath, stdout); err != nil {
-		return exitError, err
+	if *dataDir != "" {
+		id, err := saveRun(report, cfg, *dataDir, *gateAudit)
+		if err != nil {
+			return exitError, err
+		}
+		fmt.Fprintf(stderr, "vajra: saved run %s\n", id)
+	}
+	if *outPath != "" || *dataDir == "" {
+		if err := writeReport(report, *outPath, stdout); err != nil {
+			return exitError, err
+		}
 	}
 	fmt.Fprintf(stderr, "vajra: %d confirmed, %d unconfirmed, %d refuted, %d out of scope\n",
 		report.Summary[finding.Confirmed], report.Summary[finding.Unconfirmed],
@@ -172,4 +200,83 @@ func runGate(ctx context.Context, args []string, stderr io.Writer) error {
 	}
 	fmt.Fprintf(stderr, "vajra: egress gate listening on %s\n", listener.Addr())
 	return app.ServeGate(ctx, policy, listener, audit)
+}
+
+func saveRun(report app.Report, cfg config.Config, dataDir, auditPath string) (string, error) {
+	var audit io.Reader
+	if auditPath != "" {
+		f, err := os.Open(auditPath)
+		if err != nil {
+			return "", err
+		}
+		defer f.Close()
+		audit = f
+	}
+	run, err := app.Record(report, cfg, audit, dataDir, time.Now())
+	if err != nil {
+		return "", err
+	}
+	return run.ID, nil
+}
+
+func runList(args []string, stdout, stderr io.Writer) error {
+	flags := flag.NewFlagSet("runs", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	dataDir := flags.String("data", "", "data directory (required)")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if *dataDir == "" {
+		return errors.New("-data is required")
+	}
+	st, err := store.Open(*dataDir)
+	if err != nil {
+		return err
+	}
+	runs, err := st.List()
+	if err != nil {
+		return err
+	}
+	if len(runs) == 0 {
+		fmt.Fprintln(stdout, "no saved runs")
+		return nil
+	}
+	fmt.Fprintf(stdout, "%-26s %-10s %-12s %-6s %s\n", "RUN", "CONFIRMED", "UNCONFIRMED", "TOP", "TARGETS")
+	for _, r := range runs {
+		fmt.Fprintf(stdout, "%-26s %-10d %-12d %-6d %s\n", r.ID, r.Counts[finding.Confirmed],
+			r.Counts[finding.Unconfirmed], r.TopScore, strings.Join(r.Targets, ", "))
+	}
+	return nil
+}
+
+func runRender(args []string, stdout, stderr io.Writer) error {
+	flags := flag.NewFlagSet("report", flag.ContinueOnError)
+	flags.SetOutput(stderr)
+	dataDir := flags.String("data", "", "data directory (required)")
+	runID := flags.String("run", "", "run ID, as printed by scan or listed by runs (required)")
+	format := flags.String("format", "html", "html, md or json")
+	outPath := flags.String("out", "", "write here instead of standard output")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if *dataDir == "" || *runID == "" {
+		return errors.New("-data and -run are required")
+	}
+	st, err := store.Open(*dataDir)
+	if err != nil {
+		return err
+	}
+	run, err := st.Get(*runID)
+	if err != nil {
+		return err
+	}
+	rendered, err := app.Render(run, *format)
+	if err != nil {
+		return err
+	}
+	if *outPath == "" {
+		_, err = stdout.Write(rendered)
+		return err
+	}
+	return os.WriteFile(*outPath, rendered, reportFileMode)
 }
