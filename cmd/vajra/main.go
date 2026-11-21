@@ -66,6 +66,7 @@ Usage:
   vajra fix      -config run.json -data DIR -run ID -finding ID [-out FILE.patch]
   vajra ticket   -data DIR -run ID -finding ID [-out FILE.md]
                  [-file github -repo OWNER/NAME | -file jira -jira-url URL -jira-project KEY [-jira-type Bug]] [-force]
+  vajra recording -config run.json -har session.har [-allow IDENTITY]
   vajra demo     -data DIR
 
   vajra keygen           -private FILE -public FILE
@@ -88,6 +89,7 @@ Usage:
   exposure  check a saved run's dependencies for advisories published since
   fix       propose a patch for one code finding and check it against the rule
   ticket    write one finding as a Markdown issue, or file it in GitHub or Jira
+  recording show what a scan would take from a browser recording, and draft access checks from it
   demo      save a sample run, to explore the reports and the interface
 
   keygen            create a key pair for signing reports
@@ -140,6 +142,8 @@ func runWith(ctx context.Context, args []string, stdin io.Reader, stdout, stderr
 		err = runDemo(args[1:], stdout, stderr)
 	case "ticket":
 		err = runTicket(ctx, args[1:], stdout, stderr)
+	case "recording":
+		err = runRecording(args[1:], stdout, stderr)
 	case "pause":
 		err = runPause(args[1:], stdout, stderr)
 	case "resume":

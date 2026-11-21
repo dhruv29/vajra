@@ -279,6 +279,7 @@ not a measurement.
 | `vajra exposure -data DIR -run ID` | New advisories for a run's recorded dependencies |
 | `vajra fix -config FILE -data DIR -run ID -finding ID` | Propose a patch for a code finding and re-check it |
 | `vajra ticket -data DIR -run ID -finding ID` | Write one finding as a Markdown issue, or file it in GitHub or Jira |
+| `vajra recording -config run.json -har session.har` | Show what a scan would take from a browser recording, and draft `access_checks` entries from the pages requested while signed in. The drafts are suggestions to prune, not findings: only you know which pages are private |
 | `vajra keygen`, `sign`, `verify-signature` | Sign reports and check signatures |
 | `vajra demo -data DIR` | Save a sample run to explore |
 
