@@ -134,6 +134,7 @@ main { padding: var(--space-4) var(--space-3) var(--space-4) var(--space-4); min
 .findings .refuted { border-left-color: var(--refuted); }
 .findings .out_of_scope { border-left-color: var(--out); }
 .findings .title { font-weight: 600; }
+.kind-badge { font: 600 0.62rem/1 var(--sans); letter-spacing: 0.1em; text-transform: uppercase; color: var(--muted); border: 1px solid var(--rule); padding: 0.15rem 0.3rem; margin-left: 0.5rem; vertical-align: middle; }
 .findings .where { grid-column: 1; font: 0.76rem/1.4 var(--mono); color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .findings .score { grid-row: 1 / span 2; grid-column: 2; text-align: right; font: 600 1.5rem/1 var(--serif); align-self: center; }
 .findings .score.none { color: var(--rule); }

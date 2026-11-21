@@ -7,7 +7,9 @@
 #   2. a task container has no direct route out,
 #   3. the gate refuses an out-of-scope host,
 #   4. the gate wrote an audit log,
-#   5. the saved run renders as reports with a blast radius.
+#   5. the saved run renders as reports with a blast radius,
+#   6. a result that no longer reproduces is refuted only if the target answers,
+#   7. code analysis finds a planted injection and ignores the safe variant.
 #
 # Set E2E_KEEP=/some/dir to keep the generated reports.
 #
@@ -39,6 +41,7 @@ pass() { echo "ok: $*"; }
 echo "== building images"
 docker build -q -t vajra:local . >/dev/null
 docker build -q -t vajra-nuclei:local -f deploy/nuclei.Dockerfile deploy >/dev/null
+docker build -q -t vajra-semgrep:local -f deploy/semgrep.Dockerfile deploy >/dev/null
 go build -o "$WORK/vajra" ./cmd/vajra
 
 echo "== starting the lab"
@@ -140,5 +143,55 @@ if [ -n "${E2E_KEEP:-}" ]; then
   mkdir -p "$E2E_KEEP" && cp "$WORK/report.html" "$WORK/report.md" "$WORK/report.json" "$E2E_KEEP/"
   echo "reports kept in $E2E_KEEP"
 fi
+
+echo "== a result that does not reproduce"
+echo '{"template-id":"git-config","matched-at":"http://target/missing/.git/config","request":"GET /missing/.git/config HTTP/1.1","response":"HTTP/1.1 200 OK"}' > "$WORK/stale.jsonl"
+"$WORK/vajra" verify -config "$WORK/run.json" -in "$WORK/stale.jsonl" -out "$WORK/stale-report.json"
+grep -q '"status": "refuted"' "$WORK/stale-report.json" || fail "a result that does not reproduce on a live target was not refuted: $(cat "$WORK/stale-report.json")"
+pass "a stale result was refuted, after the canary showed the target was answering"
+
+docker stop "$TARGET" >/dev/null
+"$WORK/vajra" verify -config "$WORK/run.json" -in "$WORK/stale.jsonl" -out "$WORK/down-report.json"
+grep -q '"status": "unconfirmed"' "$WORK/down-report.json" || fail "with the target down the result must be unconfirmed, not refuted: $(cat "$WORK/down-report.json")"
+grep -q 'did not answer' "$WORK/down-report.json" || fail "the reason does not say the target was unreachable"
+pass "with the target down, the same result is left unconfirmed instead of being dismissed"
+
+echo "== code analysis"
+mkdir -p "$WORK/src/shop"
+cat > "$WORK/src/shop/views.py" <<'PYEOF'
+from flask import request
+
+
+def find_order(db):
+    order_id = request.args.get("id")
+    query = "SELECT * FROM orders WHERE id = " + order_id
+    return db.execute(query)
+
+
+def find_order_safely(db):
+    order_id = request.args.get("id")
+    return db.execute("SELECT * FROM orders WHERE id = ?", (order_id,))
+PYEOF
+chmod -R a+rX "$WORK/src"
+cat > "$WORK/code.json" <<EOF
+{
+  "authorization": {"operator": "e2e", "statement": "Lab source created by scripts/e2e.sh"},
+  "budget": {"tokens": 100000, "turns": 20, "sandbox_runs": 20, "duration_seconds": 1200},
+  "source": {
+    "root": "$WORK/src",
+    "semgrep": {"image": "vajra-semgrep:local", "rules_host_dir": "$PWD/rules/starter", "timeout_seconds": 600}
+  },
+  "refuter": {"provider": "none"}
+}
+EOF
+"$WORK/vajra" scan -config "$WORK/code.json" -out "$WORK/code-report.json" -data "$WORK/data"
+grep -q 'python-sql-injection"' "$WORK/code-report.json" || fail "the SQL injection was not reported: $(cat "$WORK/code-report.json")"
+grep -q '"target": "shop/views.py:7"' "$WORK/code-report.json" || fail "the finding is not at the vulnerable line: $(cat "$WORK/code-report.json")"
+grep -q 'shop/views.py:12' "$WORK/code-report.json" && fail "the parameterised query was reported as a vulnerability"
+grep -q '"reason": "reproduced 1 of 1 times"' "$WORK/code-report.json" || fail "the code finding was not reproduced"
+grep -q '"reason": "source located and read"' "$WORK/code-report.json" || fail "the source context was not read"
+grep -q 'return db.execute(query)' "$WORK/code-report.json" || fail "the code around the finding is missing from the evidence"
+pass "code analysis found the injection at line 7, left the safe query alone, and captured the code as evidence"
+if [ -n "${E2E_KEEP:-}" ]; then cp "$WORK/code-report.json" "$E2E_KEEP/"; fi
 
 echo "ALL CHECKS PASSED"

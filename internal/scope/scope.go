@@ -58,15 +58,22 @@ const minWildcardLabels = 2
 
 // neverAllowed can not be a test target under any configuration.
 var neverAllowed = mustPrefixes(
-	"0.0.0.0/8",      // "this network"
-	"127.0.0.0/8",    // loopback
-	"169.254.0.0/16", // link-local, cloud metadata
-	"224.0.0.0/4",    // multicast
-	"240.0.0.0/4",    // reserved, broadcast
-	"::/128",         // unspecified
-	"::1/128",        // loopback
-	"fe80::/10",      // link-local
-	"ff00::/8",       // multicast
+	"0.0.0.0/8",        // "this network"
+	"127.0.0.0/8",      // loopback
+	"169.254.0.0/16",   // link-local, cloud metadata
+	"168.63.129.16/32", // Azure platform endpoint
+	"192.88.99.0/24",   // 6to4 relay anycast
+	"224.0.0.0/4",      // multicast
+	"240.0.0.0/4",      // reserved, broadcast
+	"::/96",            // unspecified, loopback and IPv4-compatible addresses
+	"fe80::/10",        // link-local
+	"ff00::/8",         // multicast
+	// Ranges that carry an IPv4 address inside an IPv6 one. They could smuggle
+	// a loopback or metadata address past the IPv4 rules, so none is a target.
+	"64:ff9b::/96",   // NAT64
+	"64:ff9b:1::/48", // local-use NAT64
+	"2002::/16",      // 6to4
+	"2001::/32",      // Teredo
 )
 
 // privateRanges are reachable only when a listed CIDR covers the address.
@@ -78,8 +85,6 @@ var privateRanges = mustPrefixes(
 	"192.0.0.0/24",  // IETF protocol assignments
 	"198.18.0.0/15", // benchmarking
 	"fc00::/7",      // unique local
-	"64:ff9b::/96",  // NAT64: embeds an IPv4 address
-	"2002::/16",     // 6to4: embeds an IPv4 address
 )
 
 func mustPrefixes(cidrs ...string) []netip.Prefix {
@@ -123,7 +128,7 @@ func New(c Config) (*Policy, error) {
 }
 
 func (p *Policy) addHost(raw string) error {
-	h := normalizeHost(raw)
+	h := NormalizeHost(strings.TrimSpace(raw))
 	if h == "" {
 		return errors.New("scope: empty host entry")
 	}
@@ -150,7 +155,10 @@ func parseCIDR(raw string) (netip.Prefix, error) {
 	if err != nil {
 		return netip.Prefix{}, fmt.Errorf("scope: CIDR %q: %w", raw, err)
 	}
-	pfx = netip.PrefixFrom(pfx.Addr().Unmap(), pfx.Bits()).Masked()
+	if pfx.Addr().Is4In6() {
+		return netip.Prefix{}, fmt.Errorf("scope: CIDR %q: write IPv4 ranges in IPv4 form", raw)
+	}
+	pfx = pfx.Masked()
 	for _, blocked := range neverAllowed {
 		if pfx.Overlaps(blocked) {
 			return netip.Prefix{}, fmt.Errorf("scope: CIDR %q overlaps %s, which can never be a target", raw, blocked)
@@ -159,12 +167,18 @@ func parseCIDR(raw string) (netip.Prefix, error) {
 	return pfx, nil
 }
 
-// validName accepts DNS names made of letters, digits, hyphens and dots.
+// validName accepts DNS names made of letters, digits, hyphens and dots. The
+// last label must contain a letter, so nothing a resolver could read as a
+// numeric address is ever treated as a name.
 func validName(h string) bool {
 	if h == "" || len(h) > 253 {
 		return false
 	}
-	for _, label := range strings.Split(h, ".") {
+	labels := strings.Split(h, ".")
+	if !strings.ContainsFunc(labels[len(labels)-1], func(r rune) bool { return r >= 'a' && r <= 'z' }) {
+		return false
+	}
+	for _, label := range labels {
 		if label == "" || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
 			return false
 		}
@@ -178,8 +192,13 @@ func validName(h string) bool {
 	return true
 }
 
-func normalizeHost(h string) string {
-	return strings.TrimSuffix(strings.ToLower(strings.TrimSpace(h)), ".")
+// NormalizeHost returns the one form of a host that the policy checks and the
+// gate then resolves and dials: lower case, no surrounding brackets, no
+// trailing dot. Using the same string for the check and the connection is what
+// keeps the two from disagreeing about the destination.
+func NormalizeHost(h string) string {
+	h = strings.TrimSuffix(strings.TrimPrefix(h, "["), "]")
+	return strings.TrimSuffix(strings.ToLower(h), ".")
 }
 
 // CheckTarget is the name-level check, made before any DNS lookup. An
@@ -189,8 +208,11 @@ func (p *Policy) CheckTarget(host string, port uint16) error {
 	if _, ok := p.ports[port]; !ok {
 		return &Denied{Target: target, Reason: "port is not in scope"}
 	}
-	h := normalizeHost(strings.Trim(host, "[]"))
+	h := NormalizeHost(host)
 	if addr, err := netip.ParseAddr(h); err == nil {
+		if addr.Zone() != "" {
+			return &Denied{Target: target, Reason: "zoned addresses are not targets"}
+		}
 		return p.checkLiteral(target, addr.Unmap())
 	}
 	if _, ok := p.exact[h]; ok {
@@ -222,6 +244,9 @@ func (p *Policy) CheckResolved(host string, addr netip.Addr) error {
 	target := fmt.Sprintf("%s (%s)", host, addr)
 	if !addr.IsValid() {
 		return &Denied{Target: target, Reason: "invalid address"}
+	}
+	if addr.Zone() != "" {
+		return &Denied{Target: target, Reason: "resolves to a zoned address"}
 	}
 	if containsAddr(neverAllowed, addr) {
 		return &Denied{Target: target, Reason: "resolves to a range that can never be a target"}

@@ -75,27 +75,48 @@ func (l *stringList) UnmarshalJSON(raw []byte) error {
 	return nil
 }
 
-// Parse reads nuclei JSONL output. Lines that are not valid results are
-// counted in skipped rather than failing the whole scan.
+// Parse reads nuclei JSONL output. Lines that are not valid results, or that
+// are longer than the line limit, are counted in skipped rather than failing
+// the whole scan: one huge response must not cost every other finding.
 func Parse(r io.Reader) (findings []finding.Finding, skipped int, err error) {
-	scanner := bufio.NewScanner(r)
-	scanner.Buffer(make([]byte, 0, 64<<10), maxLineBytes)
-	for scanner.Scan() {
-		line := bytes.TrimSpace(scanner.Bytes())
-		if len(line) == 0 {
-			continue
-		}
-		var rec record
-		if json.Unmarshal(line, &rec) != nil || rec.TemplateID == "" {
+	reader := bufio.NewReaderSize(r, 64<<10)
+	for {
+		line, tooLong, readErr := readLine(reader)
+		if tooLong {
 			skipped++
-			continue
+		} else if line = bytes.TrimSpace(line); len(line) > 0 {
+			var rec record
+			if json.Unmarshal(line, &rec) != nil || rec.TemplateID == "" {
+				skipped++
+			} else {
+				findings = append(findings, rec.toFinding())
+			}
 		}
-		findings = append(findings, rec.toFinding())
+		if readErr == io.EOF {
+			return findings, skipped, nil
+		}
+		if readErr != nil {
+			return findings, skipped, fmt.Errorf("nuclei: read output: %w", readErr)
+		}
 	}
-	if err := scanner.Err(); err != nil {
-		return findings, skipped, fmt.Errorf("nuclei: read output: %w", err)
+}
+
+// readLine returns the next line. A line longer than maxLineBytes is consumed
+// and reported as tooLong, with no content.
+func readLine(reader *bufio.Reader) (line []byte, tooLong bool, err error) {
+	for {
+		chunk, isPrefix, readErr := reader.ReadLine()
+		if !tooLong {
+			if len(line)+len(chunk) > maxLineBytes {
+				line, tooLong = nil, true
+			} else {
+				line = append(line, chunk...)
+			}
+		}
+		if readErr != nil || !isPrefix {
+			return line, tooLong, readErr
+		}
 	}
-	return findings, skipped, nil
 }
 
 func (rec record) toFinding() finding.Finding {
@@ -109,6 +130,7 @@ func (rec record) toFinding() finding.Finding {
 	}
 	return finding.Finding{
 		ID:       finding.StableID(Source, rec.TemplateID, target, rec.MatcherName),
+		Kind:     finding.Dynamic,
 		Source:   Source,
 		RuleID:   rec.TemplateID,
 		Title:    title,
@@ -151,6 +173,9 @@ type Scanner struct {
 	ProxyURL  string
 	Timeout   time.Duration
 	RateLimit int
+	// CanaryTemplate is a template inside the image that matches any HTTP
+	// response. It is run when a finding does not reproduce.
+	CanaryTemplate string
 }
 
 // Validate reports the first missing setting.
@@ -158,8 +183,8 @@ func (s *Scanner) Validate() error {
 	switch {
 	case s.Runner == nil:
 		return errors.New("nuclei: a sandbox runner is required")
-	case s.Image == "" || s.TemplatesDir == "":
-		return errors.New("nuclei: image and templates directory are required")
+	case s.Image == "" || s.TemplatesDir == "" || s.CanaryTemplate == "":
+		return errors.New("nuclei: image, templates directory and canary template are required")
 	case s.Network == "" || s.Network == sandbox.NetworkNone:
 		return errors.New("nuclei: an internal network is required")
 	case s.ProxyURL == "":
@@ -175,7 +200,7 @@ func (s *Scanner) Scan(ctx context.Context, targets []string) ([]finding.Finding
 	if len(targets) == 0 {
 		return nil, errors.New("nuclei: no targets")
 	}
-	args := s.baseArgs()
+	args := s.baseArgs(s.TemplatesDir)
 	for _, target := range targets {
 		if _, _, err := verify.TargetHostPort(target); err != nil {
 			return nil, fmt.Errorf("nuclei: target %q: %w", target, err)
@@ -213,6 +238,10 @@ func withScanInputs(findings []finding.Finding, targets []string) []finding.Find
 // originally given, and reports whether the same rule matches the same place
 // again. A template builds its own request path, so re-running it against the
 // matched URL would test a different address.
+//
+// "No match" is reported only when the target demonstrably answered. If it
+// did not, the result is an error, because a gate that is down or a target
+// that has stopped responding says nothing about the finding.
 func (s *Scanner) Reproduce(ctx context.Context, f finding.Finding) (bool, error) {
 	if !templateIDPattern.MatchString(f.RuleID) {
 		return false, fmt.Errorf("nuclei: template id %q is malformed", f.RuleID)
@@ -226,7 +255,7 @@ func (s *Scanner) Reproduce(ctx context.Context, f finding.Finding) (bool, error
 			return false, fmt.Errorf("nuclei: target %q: %w", u, err)
 		}
 	}
-	args := append(s.baseArgs(), "-target", input, "-template-id", f.RuleID)
+	args := append(s.baseArgs(s.TemplatesDir), "-target", input, "-template-id", f.RuleID)
 	results, err := s.run(ctx, args)
 	if err != nil {
 		return false, err
@@ -237,10 +266,31 @@ func (s *Scanner) Reproduce(ctx context.Context, f finding.Finding) (bool, error
 			return true, nil
 		}
 	}
+	answered, err := s.targetAnswers(ctx, input)
+	if err != nil {
+		return false, err
+	}
+	if !answered {
+		return false, fmt.Errorf("nuclei: %s did not answer, so the finding could not be re-tested", origin(input))
+	}
 	return false, nil
 }
 
-func (s *Scanner) baseArgs() []string {
+// targetAnswers runs the canary template, which matches any HTTP response.
+func (s *Scanner) targetAnswers(ctx context.Context, input string) (bool, error) {
+	results, err := s.run(ctx, append(s.baseArgs(s.CanaryTemplate), "-target", input))
+	if err != nil {
+		return false, err
+	}
+	for _, r := range results {
+		if origin(r.Target) == origin(input) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func (s *Scanner) baseArgs(templates string) []string {
 	rate := s.RateLimit
 	if rate <= 0 {
 		rate = defaultRateLimit
@@ -249,7 +299,7 @@ func (s *Scanner) baseArgs() []string {
 		"-jsonl", "-silent", "-no-color",
 		"-disable-update-check", // a task has no route to the update server
 		"-no-interactsh",        // out-of-band callbacks would leave the scope
-		"-templates", s.TemplatesDir,
+		"-templates", templates,
 		"-proxy", s.ProxyURL,
 		"-rate-limit", strconv.Itoa(rate),
 	}

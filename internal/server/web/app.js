@@ -116,10 +116,13 @@ function renderOverview(run, statusFilter) {
     ["Generated", new Date(report.generated_at).toLocaleString()],
     ["Operator", report.authorization?.operator],
     ["Authorisation", report.authorization?.statement],
-    ["Targets", (report.targets || []).join(", ")],
+    ["Targets", (report.targets || []).join(", ") || "none"],
+    ["Source analysed", report.source_root || null],
     ["Reviewer", report.refuter === "none" ? "none configured: nothing can be confirmed" : report.refuter],
   ];
-  for (const [name, value] of rows) meta.append(el("dt", {}, name), el("dd", {}, value || "not recorded"));
+  for (const [name, value] of rows) {
+    if (value !== null) meta.append(el("dt", {}, name), el("dd", {}, value || "not recorded"));
+  }
 
   const tiles = $("counts");
   tiles.replaceChildren();
@@ -158,7 +161,8 @@ function renderFindings(items, currentID) {
   for (const { finding, radius } of items) {
     const button = el("button",
       { type: "button", class: finding.status, "aria-current": finding.id === currentID ? "true" : null },
-      el("span", { class: "title" }, finding.title || finding.rule_id),
+      el("span", { class: "title" }, finding.title || finding.rule_id,
+        finding.kind === "sast" ? el("span", { class: "kind-badge" }, "code") : null),
       el("span", { class: "score" + (radius.score ? "" : " none"), title: "Blast radius score out of 100" }, String(radius.score)),
       el("span", { class: "where" }, finding.target));
     button.addEventListener("click", () => writeState({ finding: finding.id }));
@@ -240,8 +244,20 @@ function renderReachTable(reach) {
 
 // ---- Finding detail ------------------------------------------------------
 
-function evidenceBlock(title, text) {
-  return text ? el("details", {}, el("summary", {}, title), el("pre", {}, text)) : null;
+function evidenceBlock(title, text, open = false) {
+  return text ? el("details", { open: open ? "" : null }, el("summary", {}, title), el("pre", {}, text)) : null;
+}
+
+/** The scanner's path from untrusted input to the dangerous call. */
+function traceTable(trace) {
+  if (!trace || trace.length === 0) return null;
+  const body = el("tbody");
+  for (const step of trace) {
+    body.append(el("tr", {},
+      el("td", { class: "fixed" }, step.role), el("td", { class: "fixed" }, `${step.file}:${step.line}`), el("td", {}, step.content)));
+  }
+  return el("div", { class: "scroll" }, el("table", {},
+    el("thead", {}, el("tr", {}, el("th", {}, "Step"), el("th", {}, "Where"), el("th", {}, "Code"))), body));
 }
 
 function renderDetail(item) {
@@ -269,6 +285,7 @@ function renderDetail(item) {
       radius.capability ? el("span", { class: "tag" }, label(radius.capability)) : null),
     el("h3", {}, finding.title || finding.rule_id),
     el("p", { class: "where" }, finding.target),
+    finding.description ? el("p", {}, finding.description) : null,
 
     el("div", { class: "radius-head" },
       el("p", { class: "eyebrow" }, "Blast radius"),
@@ -286,9 +303,12 @@ function renderDetail(item) {
   add(body,
     el("h4", {}, "Verification"), steps,
     el("h4", {}, "Evidence"),
+    evidenceBlock("Code", finding.evidence?.code, true),
+    traceTable(finding.evidence?.trace),
     evidenceBlock("Request", finding.evidence?.request),
     evidenceBlock("Response", finding.evidence?.response),
-    !finding.evidence?.request && !finding.evidence?.response ? el("p", { class: "basis" }, "The scanner captured no request or response.") : null,
+    !finding.evidence?.request && !finding.evidence?.response && !finding.evidence?.code
+      ? el("p", { class: "basis" }, "The scanner captured no evidence.") : null,
   );
 }
 

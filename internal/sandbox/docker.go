@@ -10,12 +10,14 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"strings"
 	"time"
 )
 
 const (
-	killTimeout   = 10 * time.Second
-	nameRandBytes = 8
+	killTimeout      = 10 * time.Second
+	nameRandBytes    = 8
+	inspectOutputCap = 4 << 10
 )
 
 // Runner runs a Spec and returns what it produced.
@@ -136,4 +138,31 @@ func (c *cappedBuffer) Write(p []byte) (int, error) {
 	}
 	c.buf.Write(p)
 	return len(p), nil
+}
+
+// RequireInternalNetwork fails unless name is exactly the name of a Docker
+// network created with --internal. A task attached to any other network would
+// have a route that does not pass through the egress gate.
+func (d *Docker) RequireInternalNetwork(ctx context.Context, name string) error {
+	if err := validateNetwork(name); err != nil {
+		return err
+	}
+	if name == NetworkNone {
+		return nil
+	}
+	var stdout, stderr cappedBuffer
+	stdout.limit, stderr.limit = inspectOutputCap, inspectOutputCap
+	code, err := d.exec(ctx, []string{"network", "inspect", "--format", "{{.Internal}} {{.Name}}", name}, &stdout, &stderr)
+	if err != nil {
+		return fmt.Errorf("sandbox: inspect network %q: %w", name, err)
+	}
+	if code != 0 {
+		return fmt.Errorf("sandbox: network %q does not exist: create it with docker network create --internal", name)
+	}
+	// Docker also resolves a network by ID prefix, so the name it reports must
+	// be the name that was asked for.
+	if got := strings.TrimSpace(stdout.buf.String()); got != "true "+name {
+		return fmt.Errorf("sandbox: network %q is not an internal network, so tasks on it could bypass the gate", name)
+	}
+	return nil
 }

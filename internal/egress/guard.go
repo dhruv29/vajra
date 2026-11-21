@@ -61,6 +61,9 @@ func (g *Guard) DialContext(ctx context.Context, network, address string) (net.C
 	if err != nil {
 		return nil, err
 	}
+	// From here on the normalised host is the only form used: the same string
+	// is checked, resolved and (as a pinned address) dialled.
+	host = scope.NormalizeHost(host)
 	if err := g.policy.CheckTarget(host, port); err != nil {
 		return nil, err
 	}

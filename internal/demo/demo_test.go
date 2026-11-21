@@ -22,7 +22,7 @@ func TestRunIsConsistentAndRenders(t *testing.T) {
 	if counted != len(run.Report.Findings) || len(run.Radii) != len(run.Report.Findings) {
 		t.Fatalf("summary counts %d of %d findings; radii = %d", counted, len(run.Report.Findings), len(run.Radii))
 	}
-	if run.Report.Summary[finding.Confirmed] != 3 || run.Radii[0].FindingID != "demo-rce" || run.Radii[0].Score < 90 {
+	if run.Report.Summary[finding.Confirmed] != 4 || run.Radii[0].FindingID != "demo-rce" || run.Radii[0].Score < 90 {
 		t.Fatalf("summary = %v, top radius = %+v", run.Report.Summary, run.Radii[0])
 	}
 	if env, _ := run.Radius("demo-env"); env.Capability != "credential_exposure" {
@@ -31,13 +31,19 @@ func TestRunIsConsistentAndRenders(t *testing.T) {
 	if run.Reach == nil || run.Reach.DeniedTotal != 14 {
 		t.Fatalf("reach = %+v", run.Reach)
 	}
+	if code, _ := run.Radius("demo-code-cmdi"); code.OriginID != "service:shop.example.test:443" || code.Score < 80 {
+		t.Fatalf("the code finding is not anchored to its service: %+v", code)
+	}
 	for _, f := range run.Report.Findings {
+		if f.Kind == finding.Static {
+			continue
+		}
 		if !strings.Contains(f.Target, ".example.test") {
 			t.Errorf("%s uses a host that is not reserved for examples: %s", f.ID, f.Target)
 		}
 	}
 	html, err := report.HTML(run)
-	if err != nil || !strings.Contains(string(html), "4 findings need attention") {
+	if err != nil || !strings.Contains(string(html), "5 findings need attention") {
 		t.Fatalf("HTML report: err = %v", err)
 	}
 }

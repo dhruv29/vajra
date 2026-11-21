@@ -39,6 +39,7 @@ type item struct {
 	Radius   blast.Radius
 	Request  string
 	Response string
+	Code     string
 }
 
 // view is what the templates render.
@@ -63,7 +64,10 @@ func newView(run record.Run) view {
 	}
 	for _, f := range run.Report.Findings {
 		radius, _ := run.Radius(f.ID)
-		it := item{Finding: f, Radius: radius, Request: clip(f.Evidence.Request), Response: clip(f.Evidence.Response)}
+		it := item{
+			Finding: f, Radius: radius,
+			Request: clip(f.Evidence.Request), Response: clip(f.Evidence.Response), Code: clip(f.Evidence.Code),
+		}
 		if f.Status == finding.Confirmed || f.Status == finding.Unconfirmed {
 			v.Attention = append(v.Attention, it)
 		} else {
@@ -130,9 +134,13 @@ func Markdown(run record.Run) string {
 	r := run.Report
 	var b strings.Builder
 	fmt.Fprintf(&b, "# Security test report\n\n")
-	fmt.Fprintf(&b, "- **Run:** %s\n- **Generated:** %s\n- **Operator:** %s\n- **Authorisation:** %s\n- **Targets:** %s\n\n",
+	fmt.Fprintf(&b, "- **Run:** %s\n- **Generated:** %s\n- **Operator:** %s\n- **Authorisation:** %s\n- **Targets:** %s\n",
 		md(run.ID), r.GeneratedAt.Format("2006-01-02 15:04 MST"), md(r.Authorization.Operator),
-		md(r.Authorization.Statement), md(strings.Join(r.Targets, ", ")))
+		md(r.Authorization.Statement), md(orNone(strings.Join(r.Targets, ", "))))
+	if r.SourceRoot != "" {
+		fmt.Fprintf(&b, "- **Source analysed:** %s\n", md(r.SourceRoot))
+	}
+	b.WriteString("\n")
 
 	b.WriteString("## Summary\n\n| Status | Findings |\n|---|---|\n")
 	for _, c := range v.Counts {
@@ -169,6 +177,9 @@ func writeFinding(b *strings.Builder, n int, it item) {
 	fmt.Fprintf(b, "### %d. %s\n\n", n, md(f.Title))
 	fmt.Fprintf(b, "- **Status:** %s\n- **Severity:** %s\n- **Blast radius score:** %d / 100\n- **Where:** %s\n- **Rule:** %s (%s)\n\n",
 		label(f.Status), f.Severity, radius.Score, md(f.Target), md(f.RuleID), md(f.Source))
+	if f.Description != "" {
+		fmt.Fprintf(b, "%s\n\n", md(f.Description))
+	}
 
 	fmt.Fprintf(b, "**Blast radius.** %s Classified as %s: %s.\n\n", md(radius.Summary), label(radius.Capability), md(radius.CapabilityBasis))
 	if len(radius.Reach) > 1 {
@@ -185,6 +196,16 @@ func writeFinding(b *strings.Builder, n int, it item) {
 	}
 	b.WriteString("\n")
 
+	if it.Code != "" {
+		b.WriteString("**Code.**\n\n" + fenced(it.Code) + "\n")
+	}
+	if len(f.Evidence.Trace) > 0 {
+		b.WriteString("**Path from input to the dangerous call.**\n\n| Step | Where | Code |\n|---|---|---|\n")
+		for _, step := range f.Evidence.Trace {
+			fmt.Fprintf(b, "| %s | %s:%d | %s |\n", md(step.Role), md(step.File), step.Line, md(step.Content))
+		}
+		b.WriteString("\n")
+	}
 	if it.Request != "" {
 		b.WriteString("**Request.**\n\n" + fenced(it.Request) + "\n")
 	}

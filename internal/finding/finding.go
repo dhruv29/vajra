@@ -5,6 +5,7 @@ package finding
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -65,6 +66,38 @@ func (s Severity) Rank() int {
 	}
 }
 
+// Kind says how a finding was found.
+type Kind string
+
+const (
+	// Dynamic findings come from testing a running application.
+	Dynamic Kind = "dast"
+	// Static findings come from analysing source code.
+	Static Kind = "sast"
+)
+
+// Location is a place in source code, relative to the scanned source root.
+type Location struct {
+	File    string `json:"file"`
+	Line    int    `json:"line"`
+	EndLine int    `json:"end_line,omitempty"`
+}
+
+// SafeRelPath reports whether p is a clean relative path that stays inside
+// the source root it is relative to.
+func SafeRelPath(p string) bool {
+	return p != "" && !filepath.IsAbs(p) && filepath.Clean(p) == p && p != ".." &&
+		!strings.HasPrefix(p, "../") && !strings.ContainsRune(p, 0)
+}
+
+// TraceStep is one step on the path from untrusted input to a dangerous call.
+type TraceStep struct {
+	Role    string `json:"role"` // source, propagation or sink
+	File    string `json:"file"`
+	Line    int    `json:"line"`
+	Content string `json:"content"`
+}
+
 // Evidence is what proves a finding. Everything here came from the target or
 // a tool and is untrusted data.
 type Evidence struct {
@@ -76,6 +109,11 @@ type Evidence struct {
 	ScanInput string   `json:"scan_input,omitempty"`
 	Matcher   string   `json:"matcher,omitempty"`
 	Extracted []string `json:"extracted,omitempty"`
+	// Code is the source around a static finding, with line numbers. Vajra
+	// reads it from the source tree itself rather than trusting the scanner.
+	Code string `json:"code,omitempty"`
+	// Trace is the scanner's source-to-sink path, when it reports one.
+	Trace []TraceStep `json:"trace,omitempty"`
 }
 
 // Outcome is the result of one verification stage.
@@ -97,12 +135,21 @@ type Verdict struct {
 
 // Finding is one reported issue.
 type Finding struct {
-	ID       string   `json:"id"`
-	Source   string   `json:"source"`
-	RuleID   string   `json:"rule_id"`
-	Title    string   `json:"title"`
-	Severity Severity `json:"severity"`
-	Target   string   `json:"target"`
+	ID     string `json:"id"`
+	Kind   Kind   `json:"kind,omitempty"`
+	Source string `json:"source"`
+	RuleID string `json:"rule_id"`
+	Title  string `json:"title"`
+	// Description is the scanner's explanation of the rule, when it gives one.
+	Description string   `json:"description,omitempty"`
+	Severity    Severity `json:"severity"`
+	// Target is a URL for a dynamic finding and "file:line" for a static one.
+	Target string `json:"target"`
+	// Location is set for static findings.
+	Location *Location `json:"location,omitempty"`
+	// AssetURL is the running service a static finding's code belongs to, when
+	// the operator declared one. It anchors the finding in the asset graph.
+	AssetURL string `json:"asset_url,omitempty"`
 	// Tags and CWE are the scanner's own classification of the rule.
 	Tags     []string  `json:"tags,omitempty"`
 	CWE      []string  `json:"cwe,omitempty"`

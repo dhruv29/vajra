@@ -77,7 +77,7 @@ func Classify(f finding.Finding) (Capability, string) {
 		capability, basis = c, "scanner tag \""+key+"\""
 	}
 	if exposesCredentials(f) && power(CredentialExposure) < power(capability) {
-		return CredentialExposure, "the captured values look like credentials"
+		return CredentialExposure, "values in the response look like credentials (taken from the target's own output, so unverified)"
 	}
 	return capability, basis
 }

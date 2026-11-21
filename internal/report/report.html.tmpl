@@ -66,7 +66,8 @@ pre { font: .8rem/1.45 var(--mono); background: #f1efe9; border: 1px solid var(-
     <dt>Generated</dt><dd>{{.Run.Report.GeneratedAt.Format "2006-01-02 15:04 MST"}}</dd>
     <dt>Operator</dt><dd>{{.Run.Report.Authorization.Operator}}</dd>
     <dt>Authorisation</dt><dd>{{.Run.Report.Authorization.Statement}}</dd>
-    <dt>Targets</dt><dd>{{range $i, $t := .Run.Report.Targets}}{{if $i}}, {{end}}{{$t}}{{end}}</dd>
+    <dt>Targets</dt><dd>{{range $i, $t := .Run.Report.Targets}}{{if $i}}, {{end}}{{$t}}{{else}}none{{end}}</dd>
+    {{if .Run.Report.SourceRoot}}<dt>Source analysed</dt><dd>{{.Run.Report.SourceRoot}}</dd>{{end}}
   </dl>
   <section class="counts" aria-label="Findings by status">
     {{range .Counts}}<div class="count"><b>{{.N}}</b><span>{{label .Status}}</span></div>{{end}}
@@ -90,6 +91,7 @@ pre { font: .8rem/1.45 var(--mono); background: #f1efe9; border: 1px solid var(-
     </div>
     <div class="score"><b>{{.Radius.Score}}</b><span>blast radius / 100</span></div>
   </div>
+  {{if .Finding.Description}}<p>{{.Finding.Description}}</p>{{end}}
   <p>{{.Radius.Summary}} <span class="note">Classified from {{.Radius.CapabilityBasis}}.</span></p>
   {{if gt (len .Radius.Reach) 1}}
   <table>
@@ -102,6 +104,15 @@ pre { font: .8rem/1.45 var(--mono); background: #f1efe9; border: 1px solid var(-
   <ul class="steps" aria-label="Verification steps">
     {{range .Finding.Verdicts}}<li class="{{.Outcome}}"><strong>{{.Stage}}</strong>: {{.Outcome}}. {{.Reason}}</li>{{end}}
   </ul>
+  {{if .Code}}<details open><summary>Code</summary><pre>{{.Code}}</pre></details>{{end}}
+  {{if .Finding.Evidence.Trace}}
+  <table>
+    <thead><tr><th>Step</th><th>Where</th><th>Code</th></tr></thead>
+    <tbody>
+    {{range .Finding.Evidence.Trace}}<tr><td>{{.Role}}</td><td>{{.File}}:{{.Line}}</td><td>{{.Content}}</td></tr>{{end}}
+    </tbody>
+  </table>
+  {{end}}
   {{if .Request}}<details><summary>Request</summary><pre>{{.Request}}</pre></details>{{end}}
   {{if .Response}}<details><summary>Response</summary><pre>{{.Response}}</pre></details>{{end}}
 </article>

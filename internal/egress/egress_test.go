@@ -16,6 +16,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/dhruv29/vajra/internal/scope"
 )
@@ -152,7 +153,7 @@ func TestProxyForwardsInScopeHTTPToThePinnedAddress(t *testing.T) {
 	if got := f.dialer.addresses(); len(got) != 1 || got[0] != "203.0.113.10:80" {
 		t.Fatalf("dialed %v; want the resolved address, not the name", got)
 	}
-	if e := lastEvent(t, f.sink); !e.Allowed || e.Target != "app.test:80" {
+	if e := lastEvent(t, f.sink); !e.Allowed || e.Outcome != Allowed || e.Target != "app.test:80" {
 		t.Fatalf("audit event = %+v", e)
 	}
 }
@@ -179,7 +180,7 @@ func TestProxyBlocksOutOfScopeRequests(t *testing.T) {
 			if got := f.dialer.addresses(); len(got) != 0 {
 				t.Fatalf("a connection was opened to %v", got)
 			}
-			if e := lastEvent(t, f.sink); e.Allowed || e.Reason == "" {
+			if e := lastEvent(t, f.sink); e.Allowed || e.Outcome != Denied || e.Reason == "" {
 				t.Fatalf("audit event = %+v; want a denial with a reason", e)
 			}
 		})
@@ -236,8 +237,8 @@ func TestProxyReportsUnreachableUpstreamAsBadGateway(t *testing.T) {
 	if status != http.StatusBadGateway {
 		t.Fatalf("status = %d; want 502", status)
 	}
-	if e := lastEvent(t, f.sink); e.Allowed {
-		t.Fatalf("audit event = %+v; want not allowed", e)
+	if e := lastEvent(t, f.sink); !e.Allowed || e.Outcome != Failed || e.Reason == "" {
+		t.Fatalf("audit event = %+v; an unreachable target was allowed by policy but failed", e)
 	}
 }
 
@@ -296,6 +297,22 @@ func TestGuardRejectsMalformedAddresses(t *testing.T) {
 	}
 }
 
+func TestGuardChecksResolvesAndDialsTheSameNormalisedHost(t *testing.T) {
+	policy, _ := scope.New(scope.Config{Hosts: []string{"app.test"}})
+	dialer := &redirectDialer{err: errors.New("stop after recording")}
+	guard, _ := NewGuard(policy, testResolver, dialer.dial)
+
+	for _, address := range []string{"APP.test.:443", "App.Test:443"} {
+		_, err := guard.DialContext(context.Background(), "tcp", address)
+		if scope.IsDenied(err) || err == nil || strings.Contains(err.Error(), "resolve") {
+			t.Fatalf("DialContext(%q) = %v; the name the policy approved must be the one resolved", address, err)
+		}
+	}
+	if got := dialer.addresses(); len(got) != 2 || got[0] != "203.0.113.10:443" || got[1] != "203.0.113.10:443" {
+		t.Fatalf("dialed %v", got)
+	}
+}
+
 func TestGuardFailsWhenANameDoesNotResolve(t *testing.T) {
 	policy, _ := scope.New(scope.Config{Hosts: []string{"app.test", "empty.test"}})
 	guard, _ := NewGuard(policy, fakeResolver{"empty.test": {}}, nil)
@@ -325,8 +342,10 @@ func TestJSONLSinkWritesOneObjectPerLine(t *testing.T) {
 	var buf bytes.Buffer
 	sink := NewJSONLSink(&buf)
 
-	sink.Record(Event{Method: "GET", Target: "app.test:80", Allowed: true})
-	sink.Record(Event{Method: "CONNECT", Target: "evil.test:443", Reason: "host is not in scope"})
+	if err := sink.Record(Event{Method: "GET", Target: "app.test:80", Allowed: true}); err != nil {
+		t.Fatal(err)
+	}
+	_ = sink.Record(Event{Method: "CONNECT", Target: "evil.test:443", Reason: "host is not in scope"})
 
 	lines := strings.Split(strings.TrimSpace(buf.String()), "\n")
 	if len(lines) != 2 {
@@ -334,5 +353,113 @@ func TestJSONLSinkWritesOneObjectPerLine(t *testing.T) {
 	}
 	if !strings.Contains(lines[1], `"allowed":false`) || !strings.Contains(lines[1], "evil.test:443") {
 		t.Fatalf("second line = %s", lines[1])
+	}
+}
+
+// brokenSink fails every write, like a full disk.
+type brokenSink struct{}
+
+func (brokenSink) Record(Event) error { return errors.New("disk full") }
+
+func TestNothingIsForwardedWhenTheAuditLogCannotBeWritten(t *testing.T) {
+	for _, useTLS := range []bool{false, true} {
+		upstream := helloServer(t, useTLS)
+		policy, _ := scope.New(scope.Config{Hosts: []string{"app.test"}})
+		dialer := &redirectDialer{to: upstream.Listener.Addr().String()}
+		guard, _ := NewGuard(policy, testResolver, dialer.dial)
+		proxy, _ := NewProxy(guard, brokenSink{})
+		server := httptest.NewServer(proxy)
+		proxyURL, _ := url.Parse(server.URL)
+		client := fixture{proxyURL: proxyURL}.client()
+
+		scheme := map[bool]string{false: "http", true: "https"}[useTLS]
+		resp, err := client.Get(scheme + "://app.test/")
+
+		if err == nil {
+			body, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			if resp.StatusCode != http.StatusServiceUnavailable || strings.Contains(string(body), "hello") {
+				t.Errorf("%s: status = %d, body = %q; want 503 and nothing forwarded", scheme, resp.StatusCode, body)
+			}
+		} else if !strings.Contains(err.Error(), "503") && !strings.Contains(err.Error(), "Service Unavailable") {
+			t.Errorf("%s: err = %v; want the tunnel refused with 503", scheme, err)
+		}
+		server.Close()
+	}
+}
+
+func TestAnIdleTunnelIsClosed(t *testing.T) {
+	silent, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer silent.Close()
+	go func() {
+		for {
+			conn, err := silent.Accept()
+			if err != nil {
+				return
+			}
+			defer conn.Close() // accept and say nothing
+		}
+	}()
+	policy, _ := scope.New(scope.Config{Hosts: []string{"app.test"}})
+	dialer := &redirectDialer{to: silent.Addr().String()}
+	guard, _ := NewGuard(policy, testResolver, dialer.dial)
+	proxy, _ := NewProxy(guard, &MemorySink{})
+	proxy.tunnelIdle = 150 * time.Millisecond
+	server := httptest.NewServer(proxy)
+	defer server.Close()
+
+	conn, err := net.Dial("tcp", server.Listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	fmt.Fprint(conn, "CONNECT app.test:443 HTTP/1.1\r\nHost: app.test:443\r\n\r\n")
+	reader := bufio.NewReader(conn)
+	resp, err := http.ReadResponse(reader, nil)
+	if err != nil || resp.StatusCode != http.StatusOK {
+		t.Fatalf("tunnel was not opened: %v", err)
+	}
+
+	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	started := time.Now()
+	_, err = reader.ReadByte()
+
+	if err == nil || time.Since(started) > 4*time.Second {
+		t.Fatalf("the idle tunnel was still open after %v (err = %v)", time.Since(started), err)
+	}
+}
+
+func TestOnlyTheGatesOwnResponsesCarryTheGateHeader(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set(GateHeader, "failed") // a target pretending to be the gate
+		w.WriteHeader(http.StatusBadGateway)
+	}))
+	defer upstream.Close()
+	f := newFixture(t, upstream.Listener.Addr().String(), testResolver)
+
+	relayed, err := f.client().Get("http://app.test/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	relayed.Body.Close()
+	denied, _ := f.client().Get("http://evil.test/")
+	denied.Body.Close()
+	// A fresh gate, so the request cannot reuse the connection opened above.
+	down := newFixture(t, upstream.Listener.Addr().String(), testResolver)
+	down.dialer.err = errors.New("connection refused")
+	unreachable, err := down.client().Get("http://app.test/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	unreachable.Body.Close()
+
+	if relayed.StatusCode != http.StatusBadGateway || relayed.Header.Get(GateHeader) != "" {
+		t.Fatalf("relayed: status = %d, gate header = %q; a target's own 502 must not look like the gate's", relayed.StatusCode, relayed.Header.Get(GateHeader))
+	}
+	if denied.Header.Get(GateHeader) != "denied" || unreachable.Header.Get(GateHeader) != "failed" {
+		t.Fatalf("gate header: denied = %q, unreachable = %q", denied.Header.Get(GateHeader), unreachable.Header.Get(GateHeader))
 	}
 }

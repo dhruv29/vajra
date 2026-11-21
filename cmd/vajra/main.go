@@ -61,6 +61,13 @@ With -data, scan and verify also save the run so that it can be reported on.
 -gate-audit adds the gate's audit log, which shows what the run touched.
 `
 
+// newDeps builds the real dependencies of a run. Tests replace it so that
+// they do not need Docker.
+var newDeps = func() app.Deps {
+	docker := sandbox.NewDocker()
+	return app.Deps{Runner: docker, CheckNetwork: docker.RequireInternalNetwork, Getenv: os.Getenv}
+}
+
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -125,7 +132,8 @@ func runReport(ctx context.Context, command string, args []string, stdout, stder
 	if err != nil {
 		return exitError, err
 	}
-	deps := app.Deps{Runner: sandbox.NewDocker(), Getenv: os.Getenv}
+	deps := newDeps()
+	started := time.Now()
 
 	var report app.Report
 	if command == "verify" {
@@ -149,7 +157,7 @@ func runReport(ctx context.Context, command string, args []string, stdout, stder
 	}
 
 	if *dataDir != "" {
-		id, err := saveRun(report, cfg, *dataDir, *gateAudit)
+		id, err := saveRun(report, cfg, *dataDir, *gateAudit, started)
 		if err != nil {
 			return exitError, err
 		}
@@ -179,15 +187,14 @@ func writeReport(report app.Report, path string, stdout io.Writer) error {
 		_, err = stdout.Write(raw)
 		return err
 	}
-	// Reports contain captured requests and responses, so keep them private.
-	return os.WriteFile(path, raw, reportFileMode)
+	return writePrivate(path, raw)
 }
 
 func runGate(ctx context.Context, args []string, stderr io.Writer) error {
 	flags := flag.NewFlagSet("gate", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	configPath := flags.String("config", "", "path to the run configuration (required)")
-	listen := flags.String("listen", ":3128", "address the proxy listens on")
+	listen := flags.String("listen", "127.0.0.1:3128", "address the proxy listens on; it has no authentication, so expose it only to the task network")
 	auditPath := flags.String("audit", "", "append the audit log here instead of standard error")
 	if err := flags.Parse(args); err != nil {
 		return err
@@ -199,6 +206,9 @@ func runGate(ctx context.Context, args []string, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
+	if policy == nil {
+		return errors.New("this configuration has no scope, so there is nothing for a gate to enforce")
+	}
 	audit := stderr
 	if *auditPath != "" {
 		f, err := os.OpenFile(*auditPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, auditFileMode)
@@ -206,6 +216,9 @@ func runGate(ctx context.Context, args []string, stderr io.Writer) error {
 			return err
 		}
 		defer f.Close()
+		if err := f.Chmod(auditFileMode); err != nil {
+			return err
+		}
 		audit = f
 	}
 	listener, err := net.Listen("tcp", *listen)
@@ -216,7 +229,7 @@ func runGate(ctx context.Context, args []string, stderr io.Writer) error {
 	return app.ServeGate(ctx, policy, listener, audit)
 }
 
-func saveRun(report app.Report, cfg config.Config, dataDir, auditPath string) (string, error) {
+func saveRun(report app.Report, cfg config.Config, dataDir, auditPath string, started time.Time) (string, error) {
 	var audit io.Reader
 	if auditPath != "" {
 		f, err := os.Open(auditPath)
@@ -226,7 +239,7 @@ func saveRun(report app.Report, cfg config.Config, dataDir, auditPath string) (s
 		defer f.Close()
 		audit = f
 	}
-	run, err := app.Record(report, cfg, audit, dataDir, time.Now())
+	run, err := app.Record(report, cfg, audit, started, dataDir, time.Now())
 	if err != nil {
 		return "", err
 	}
@@ -292,7 +305,17 @@ func runRender(args []string, stdout, stderr io.Writer) error {
 		_, err = stdout.Write(rendered)
 		return err
 	}
-	return os.WriteFile(*outPath, rendered, reportFileMode)
+	return writePrivate(*outPath, rendered)
+}
+
+// writePrivate writes a file that only its owner can read. Reports hold
+// captured requests and responses. The mode is set explicitly because writing
+// over an existing file would otherwise keep that file's looser mode.
+func writePrivate(path string, content []byte) error {
+	if err := os.WriteFile(path, content, reportFileMode); err != nil {
+		return err
+	}
+	return os.Chmod(path, reportFileMode)
 }
 
 func runServe(ctx context.Context, args []string, stderr io.Writer) error {

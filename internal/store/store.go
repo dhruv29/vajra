@@ -48,6 +48,10 @@ func Open(dataDir string) (*Store, error) {
 	if err := os.MkdirAll(dir, dirMode); err != nil {
 		return nil, fmt.Errorf("store: %w", err)
 	}
+	// MkdirAll leaves an existing directory's mode alone, so tighten it.
+	if err := os.Chmod(dir, dirMode); err != nil {
+		return nil, fmt.Errorf("store: %w", err)
+	}
 	return &Store{dir: dir}, nil
 }
 

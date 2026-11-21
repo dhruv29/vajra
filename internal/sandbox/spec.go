@@ -25,11 +25,12 @@ const (
 	NetworkNone = "none"
 )
 
-// Mount binds a host directory into the container.
+// Mount binds a host directory into the container. It is read-only unless
+// Writable is set.
 type Mount struct {
 	Source   string
 	Target   string
-	ReadOnly bool
+	Writable bool
 }
 
 // Spec describes one sandboxed run.
@@ -73,8 +74,18 @@ var (
 // forbiddenNetworks would give the tool a route around the egress gate.
 var forbiddenNetworks = map[string]bool{"host": true, "bridge": true, "default": true}
 
-// forbiddenMountSources would hand the tool control of the host.
-var forbiddenMountSources = []string{"/", "/var/run", "/run", "/etc", "/proc", "/sys", "/dev"}
+// forbiddenMountTrees would hand the tool control of the host: neither they
+// nor anything beneath them may be mounted.
+var forbiddenMountTrees = []string{"/var/run", "/run", "/etc", "/proc", "/sys", "/dev", "/var/lib/docker", "/root", "/boot"}
+
+// forbiddenMountRoots are too broad to mount whole, though a project
+// directory beneath them is fine.
+var forbiddenMountRoots = map[string]bool{"/": true, "/var": true, "/usr": true, "/home": true, "/Users": true, "/opt": true, "/srv": true}
+
+const (
+	maxID        = 1<<31 - 1
+	containerTag = "vajra.sandbox=1"
+)
 
 func (s Spec) withDefaults() Spec {
 	if s.MemoryMB == 0 {
@@ -109,8 +120,8 @@ func (s Spec) Validate() error {
 	if err := validateNetwork(s.Network); err != nil {
 		return err
 	}
-	if !userPattern.MatchString(s.User) || strings.HasPrefix(s.User, "0:") {
-		return fmt.Errorf("sandbox: user %q must be a numeric non-root uid:gid", s.User)
+	if !nonRootUser(s.User) {
+		return fmt.Errorf("sandbox: user %q must be a numeric uid:gid, neither of them 0", s.User)
 	}
 	if s.MemoryMB < 0 || s.PIDs < 0 || s.CPUs < 0 || s.OutputCap < 0 {
 		return errors.New("sandbox: resource limits must not be negative")
@@ -129,6 +140,18 @@ func (s Spec) Validate() error {
 		return fmt.Errorf("sandbox: workdir %q must be a clean absolute path", s.Workdir)
 	}
 	return nil
+}
+
+// nonRootUser reports whether user is "uid:gid" with both numbers above zero.
+// The numbers are parsed, so "00:0" is recognised as root.
+func nonRootUser(user string) bool {
+	if !userPattern.MatchString(user) {
+		return false
+	}
+	uidText, gidText, _ := strings.Cut(user, ":")
+	uid, uidErr := strconv.ParseUint(uidText, 10, 32)
+	gid, gidErr := strconv.ParseUint(gidText, 10, 32)
+	return uidErr == nil && gidErr == nil && uid > 0 && gid > 0 && uid <= maxID && gid <= maxID
 }
 
 func validateNetwork(network string) error {
@@ -151,8 +174,11 @@ func validateMount(m Mount) error {
 	if m.Target == "/" {
 		return errors.New("sandbox: a mount may not replace the container root")
 	}
-	for _, forbidden := range forbiddenMountSources {
-		if m.Source == forbidden || (forbidden != "/" && strings.HasPrefix(m.Source, forbidden+"/")) {
+	if forbiddenMountRoots[m.Source] {
+		return fmt.Errorf("sandbox: %q is too broad to mount; mount the project directory", m.Source)
+	}
+	for _, tree := range forbiddenMountTrees {
+		if m.Source == tree || strings.HasPrefix(m.Source, tree+"/") {
 			return fmt.Errorf("sandbox: mounting %q from the host is not allowed", m.Source)
 		}
 	}
@@ -180,6 +206,7 @@ func DockerArgs(s Spec, name string) ([]string, error) {
 	memory := strconv.Itoa(s.MemoryMB) + "m"
 	args := []string{
 		"run", "--rm", "--name", name,
+		"--label", containerTag, // lets leftover containers be found and removed
 		"--network", s.Network,
 		"--read-only",
 		"--cap-drop", "ALL",
@@ -196,7 +223,7 @@ func DockerArgs(s Spec, name string) ([]string, error) {
 	}
 	for _, m := range s.Mounts {
 		mount := "type=bind,source=" + m.Source + ",target=" + m.Target
-		if m.ReadOnly {
+		if !m.Writable {
 			mount += ",readonly"
 		}
 		args = append(args, "--mount", mount)

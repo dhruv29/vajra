@@ -7,9 +7,10 @@ to disprove every result before it reports one. A finding is `confirmed` only
 after it was reproduced and survived an independent review. The aim is a short
 list of true issues with evidence, not thousands of alerts.
 
-> Status: early. The gated core, verification pipeline, blast-radius engine
-> and reports work and are tested, including an end-to-end run against a lab
-> target. Code analysis (SAST) is next; see [PLAN.md](PLAN.md).
+> Status: early. Live testing, code analysis, verification, blast radius,
+> reports and the web interface work and are tested, including an end-to-end
+> run against a lab target. See [PLAN.md](PLAN.md) for what is next and
+> [CONTRIBUTING.md](CONTRIBUTING.md) to help.
 
 ## How it works
 
@@ -48,7 +49,8 @@ go build -o vajra ./cmd/vajra
 # 2. Describe the run: who authorised it, what is in scope, the limits
 cp examples/run.json run.local.json      # then edit it
 
-# 3. Build the scanner image and start the egress gate
+# 3. Build the scanner image and start the egress gate.
+#    The task network must be internal; Vajra checks this before every scan.
 docker build -t vajra-nuclei:local -f deploy/nuclei.Dockerfile deploy
 mkdir -p data/audit && chmod 777 data/audit   # the gate writes its audit log here
 VAJRA_CONFIG="$PWD/run.local.json" VAJRA_AUDIT_DIR="$PWD/data/audit" \
@@ -68,6 +70,40 @@ the result.
 
 Restart the gate after changing the scope: it reads the configuration once at
 start.
+
+## Analysing source code
+
+Add a `source` section and `vajra scan` also analyses the code with Semgrep.
+The tree is mounted read-only into a container with no network, so the code
+cannot be changed or sent anywhere.
+
+```json
+"source": {
+  "root": "/absolute/path/to/checkout",
+  "serves": "https://app.example.com",
+  "semgrep": {
+    "image": "vajra-semgrep:local",
+    "rules_host_dir": "/absolute/path/to/vajra/rules/starter",
+    "timeout_seconds": 900
+  }
+}
+```
+
+```bash
+docker build -t vajra-semgrep:local -f deploy/semgrep.Dockerfile deploy
+```
+
+- `serves` is optional. It names the running service the code belongs to, so
+  a code finding gets a blast radius. It must be in scope.
+- Rules are never downloaded during a scan. Use `rules_host_dir` for a
+  directory on the host, or `rules_image_path` for rules baked into the image.
+  `rules/starter` holds a few precise Python rules to begin with.
+- A configuration with `source` and no `targets` needs no scope, gate or
+  scanner settings: nothing touches a network.
+
+Each code finding is checked the same way as a live one. Vajra reads the
+reported lines from the source tree itself, re-runs the rule on that file, and
+then asks the reviewer to disprove it from the code.
 
 ## Commands
 
@@ -92,8 +128,9 @@ Flags for `scan` and `verify`:
 
 ## Configuration
 
-See [examples/run.json](examples/run.json). Every section is required except
-`verify` and `refuter`.
+See [examples/run.json](examples/run.json). `authorization` and `budget` are
+always required; `scope`, `sandbox` and `nuclei` are required when there are
+`targets`.
 
 | Section | Purpose |
 |---|---|
@@ -101,6 +138,7 @@ See [examples/run.json](examples/run.json). Every section is required except
 | `scope` | Allowed hosts (`app.example.com`, `*.staging.example.com`), CIDRs and ports. Ports default to 80 and 443. |
 | `budget` | Hard caps on model tokens, model turns, sandbox runs and wall-clock time. All four are mandatory. |
 | `targets` | URLs to scan. Each must be inside `scope`. |
+| `source` | Source tree to analyse. A run needs `targets`, `source`, or both. |
 | `sandbox` | The internal Docker network and the gate's address on it. |
 | `nuclei` | Scanner image, template directory, timeout and request rate. |
 | `verify` | `reproduce_attempts` (default 2, maximum 5). |

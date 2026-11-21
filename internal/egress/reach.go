@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"sort"
+	"time"
 )
 
 const maxAuditLineBytes = 1 << 20
@@ -14,6 +15,8 @@ const maxAuditLineBytes = 1 << 20
 type TargetCount struct {
 	Target string `json:"target"`
 	Count  int    `json:"count"`
+	// Failed counts allowed connections that did not reach the target.
+	Failed int `json:"failed,omitempty"`
 	// Reason is the most recent denial reason; empty for allowed targets.
 	Reason string `json:"reason,omitempty"`
 }
@@ -26,15 +29,17 @@ type Reach struct {
 	DeniedTotal  int           `json:"denied_total"`
 }
 
-// ReadEvents parses an audit log written by JSONLSink. Lines that are not
-// audit events (for example the gate's start-up message) are skipped.
-func ReadEvents(r io.Reader) ([]Event, error) {
+// ReadEvents parses an audit log written by JSONLSink and returns the events
+// at or after since. The log is shared and append-only, so the cut-off is what
+// keeps earlier runs out of this run's record. Lines that are not audit events
+// (for example the gate's start-up message) are skipped.
+func ReadEvents(r io.Reader, since time.Time) ([]Event, error) {
 	events := []Event{}
 	scanner := bufio.NewScanner(r)
 	scanner.Buffer(make([]byte, 0, 64<<10), maxAuditLineBytes)
 	for scanner.Scan() {
 		var e Event
-		if json.Unmarshal(scanner.Bytes(), &e) != nil || e.Target == "" {
+		if json.Unmarshal(scanner.Bytes(), &e) != nil || e.Target == "" || e.Time.Before(since) {
 			continue
 		}
 		events = append(events, e)
@@ -65,6 +70,8 @@ func Summarize(events []Event) Reach {
 		entry.Count++
 		if !e.Allowed {
 			entry.Reason = e.Reason
+		} else if e.Outcome == Failed {
+			entry.Failed++
 		}
 	}
 	reach.Allowed, reach.Denied = flatten(allowed), flatten(denied)

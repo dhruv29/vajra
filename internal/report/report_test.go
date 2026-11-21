@@ -192,3 +192,41 @@ func TestLongEvidenceIsClippedInReports(t *testing.T) {
 		t.Fatal("long evidence was not clipped")
 	}
 }
+
+func TestReportsShowCodeFindingsWithTheirPath(t *testing.T) {
+	run := sampleRun(t, nil)
+	run.Report.SourceRoot = "/srv/shop"
+	run.Report.Targets = nil
+	run.Report.Findings[1] = finding.Finding{
+		ID: "sqli", Kind: finding.Static, Title: "tainted sql string", Target: "app/views.py:4", Status: finding.Confirmed,
+		Severity: finding.SeverityHigh, Source: "semgrep", RuleID: "rules.sqli", Description: "Input reaches a query. " + hostile,
+		Location: &finding.Location{File: "app/views.py", Line: 4},
+		Evidence: finding.Evidence{
+			Code: ">     4 |     return db.execute(query)  # ``` " + hostile + "\n",
+			Trace: []finding.TraceStep{
+				{Role: "source", File: "app/views.py", Line: 2, Content: "request.args.get('id')"},
+				{Role: "sink", File: "app/views.py", Line: 4, Content: "db.execute(query) " + hostile},
+			},
+		},
+	}
+
+	doc := Markdown(run)
+	raw, err := HTML(run)
+	if err != nil {
+		t.Fatal(err)
+	}
+	page := string(raw)
+
+	mustContain(t, doc, "- **Source analysed:** /srv/shop", "- **Targets:** none", "**Code.**", "````\n>     4 |",
+		"| source | app/views.py:2 | request.args.get('id') |", "| sink | app/views.py:4 |", "Input reaches a query.")
+	mustContain(t, page, "<dt>Source analysed</dt><dd>/srv/shop</dd>", "<summary>Code</summary>", "db.execute(query)",
+		"<td>source</td><td>app/views.py:2</td>", "Input reaches a query.")
+	if strings.Contains(page, "<script") || strings.Contains(page, "<img") {
+		t.Fatal("hostile text in a code finding reached the HTML unescaped")
+	}
+	for _, line := range strings.Split(doc, "\n") {
+		if strings.HasPrefix(line, "| sink") && (strings.Contains(line, "<script>") || strings.Contains(line, "![x](")) {
+			t.Fatalf("unescaped hostile text in the path table: %q", line)
+		}
+	}
+}

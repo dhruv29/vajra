@@ -145,10 +145,17 @@ var sensitiveClasses = map[string]bool{
 func Compute(g topology.Graph, f finding.Finding) Radius {
 	capability, basis := Classify(f)
 	r := Radius{FindingID: f.ID, Capability: capability, CapabilityBasis: basis, DataClasses: []string{}}
-	origin, ok := g.Asset(topology.URLAssetID(f.Target))
+	anchor := f.Target
+	if f.AssetURL != "" {
+		anchor = f.AssetURL
+	}
+	origin, ok := g.Asset(topology.URLAssetID(anchor))
 	if !ok {
 		r.Reach = []Hop{}
 		r.Summary = "The affected asset is not in the asset graph, so no reach was computed."
+		if f.Kind == finding.Static {
+			r.Summary = "This code is not linked to a running service, so no reach was computed. Set source.serves to link it."
+		}
 		return r
 	}
 	r.OriginID = origin.ID

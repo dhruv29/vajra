@@ -149,6 +149,10 @@ func (s RefuteStage) Check(ctx context.Context, f finding.Finding) (finding.Outc
 		if err := s.Budget.SpendTurn(); err != nil {
 			return finding.Inconclusive, err.Error()
 		}
+		// The review may not outlive the run's time budget.
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, s.Budget.Remaining())
+		defer cancel()
 	}
 	r, err := s.Refuter.Refute(ctx, f)
 	if err != nil {

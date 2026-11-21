@@ -3,6 +3,7 @@ package egress
 import (
 	"strings"
 	"testing"
+	"time"
 )
 
 const auditLog = `vajra: egress gate listening on [::]:3128
@@ -10,14 +11,14 @@ const auditLog = `vajra: egress gate listening on [::]:3128
 {"time":"2026-11-21T19:54:41Z","method":"GET","target":"app.test:80","allowed":true}
 {"time":"2026-11-21T19:54:42Z","method":"CONNECT","target":"evil.test:443","allowed":false,"reason":"old reason"}
 {"time":"2026-11-21T19:54:43Z","method":"CONNECT","target":"evil.test:443","allowed":false,"reason":"host is not in scope"}
-{"time":"2026-11-21T19:54:44Z","method":"GET","target":"api.app.test:80","allowed":true}
+{"time":"2026-11-21T19:54:44Z","method":"GET","target":"api.app.test:80","allowed":true,"outcome":"failed","reason":"connection refused"}
 {"time":"2026-11-21T19:54:45Z","method":"GET","target":"169.254.169.254:80","allowed":false,"reason":"never a target"}
 {"not":"an event"}
 
 `
 
 func TestReadEventsSkipsNonEventLines(t *testing.T) {
-	events, err := ReadEvents(strings.NewReader(auditLog))
+	events, err := ReadEvents(strings.NewReader(auditLog), time.Time{})
 
 	if err != nil || len(events) != 6 {
 		t.Fatalf("events = %d, err = %v; want 6", len(events), err)
@@ -25,20 +26,20 @@ func TestReadEventsSkipsNonEventLines(t *testing.T) {
 	if events[2].Method != "CONNECT" || events[2].Allowed || events[0].Time.IsZero() {
 		t.Fatalf("events = %+v", events[:3])
 	}
-	if _, err := ReadEvents(strings.NewReader(strings.Repeat("x", maxAuditLineBytes+1))); err == nil {
+	if _, err := ReadEvents(strings.NewReader(strings.Repeat("x", maxAuditLineBytes+1)), time.Time{}); err == nil {
 		t.Fatal("an oversized line was not reported")
 	}
 }
 
 func TestSummarizeGroupsByTargetBusiestFirst(t *testing.T) {
-	events, _ := ReadEvents(strings.NewReader(auditLog))
+	events, _ := ReadEvents(strings.NewReader(auditLog), time.Time{})
 
 	reach := Summarize(events)
 
 	if reach.AllowedTotal != 3 || reach.DeniedTotal != 3 {
 		t.Fatalf("totals = %d allowed, %d denied", reach.AllowedTotal, reach.DeniedTotal)
 	}
-	wantAllowed := []TargetCount{{Target: "app.test:80", Count: 2}, {Target: "api.app.test:80", Count: 1}}
+	wantAllowed := []TargetCount{{Target: "app.test:80", Count: 2}, {Target: "api.app.test:80", Count: 1, Failed: 1}}
 	if len(reach.Allowed) != 2 || reach.Allowed[0] != wantAllowed[0] || reach.Allowed[1] != wantAllowed[1] {
 		t.Fatalf("allowed = %+v", reach.Allowed)
 	}
@@ -48,5 +49,15 @@ func TestSummarizeGroupsByTargetBusiestFirst(t *testing.T) {
 	empty := Summarize(nil)
 	if empty.Allowed == nil || empty.Denied == nil || empty.AllowedTotal != 0 {
 		t.Fatalf("empty summary = %+v; lists must be empty, not null", empty)
+	}
+}
+
+func TestReadEventsKeepsOnlyThisRunsWindow(t *testing.T) {
+	since := time.Date(2026, 11, 21, 19, 54, 43, 0, time.UTC)
+
+	events, err := ReadEvents(strings.NewReader(auditLog), since)
+
+	if err != nil || len(events) != 3 || events[0].Target != "evil.test:443" {
+		t.Fatalf("events = %+v, err = %v; want only the three at or after the cut-off", events, err)
 	}
 }

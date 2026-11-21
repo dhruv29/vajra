@@ -10,6 +10,9 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/dhruv29/vajra/internal/app"
+	"github.com/dhruv29/vajra/internal/sandbox"
 )
 
 const validConfig = `{
@@ -20,6 +23,24 @@ const validConfig = `{
   "sandbox": {"network": "vajra-task-net", "proxy_url": "http://gate:3128"},
   "nuclei": {"image": "vajra-nuclei:local", "templates_dir": "/opt/nuclei-templates", "timeout_seconds": 900}
 }`
+
+// idleRunner stands in for Docker: no test here reaches a real scan.
+type idleRunner struct{}
+
+func (idleRunner) Run(context.Context, sandbox.Spec) (sandbox.Result, error) {
+	return sandbox.Result{}, nil
+}
+
+func TestMain(m *testing.M) {
+	newDeps = func() app.Deps {
+		return app.Deps{
+			Runner:       idleRunner{},
+			CheckNetwork: func(context.Context, string) error { return nil },
+			Getenv:       func(string) string { return "" },
+		}
+	}
+	os.Exit(m.Run())
+}
 
 func writeFile(t *testing.T, name, content string) string {
 	t.Helper()
@@ -155,7 +176,7 @@ func TestGateStartsAuditsToAFileAndStopsOnCancel(t *testing.T) {
 func TestSavedRunsCanBeListedAndRendered(t *testing.T) {
 	cfg := writeFile(t, "run.json", validConfig)
 	in := writeFile(t, "out.jsonl", `{"template-id":"x","matched-at":"https://elsewhere.test/a","request":"r","response":"s"}`+"\n")
-	audit := writeFile(t, "audit.jsonl", `{"method":"GET","target":"app.test:443","allowed":true}`+"\n")
+	audit := writeFile(t, "audit.jsonl", `{"time":"2999-01-01T00:00:00Z","method":"GET","target":"app.test:443","allowed":true}`+"\n")
 	data := t.TempDir()
 
 	if code, stdout, _ := invoke("runs", "-data", data); code != exitOK || !strings.Contains(stdout, "no saved runs") {
@@ -295,10 +316,26 @@ func TestDemoSavesASampleRunThatCanBeReported(t *testing.T) {
 		t.Fatalf("code = %d, stdout = %q, stderr = %q", code, stdout, stderr)
 	}
 	id := strings.SplitN(strings.SplitN(stdout, "saved sample run ", 2)[1], ";", 2)[0]
-	if code, md, _ := invoke("report", "-data", data, "-run", id, "-format", "md"); code != exitOK || !strings.Contains(md, "| confirmed | 3 |") {
+	if code, md, _ := invoke("report", "-data", data, "-run", id, "-format", "md"); code != exitOK || !strings.Contains(md, "| confirmed | 4 |") {
 		t.Fatalf("report: code = %d", code)
 	}
 	if code, _, _ := invoke("demo"); code != exitError {
 		t.Fatalf("demo without -data: code = %d", code)
+	}
+}
+
+func TestReportsOverwriteAnExistingFilePrivately(t *testing.T) {
+	cfg := writeFile(t, "run.json", validConfig)
+	in := writeFile(t, "empty.jsonl", "")
+	out := filepath.Join(t.TempDir(), "report.json")
+	if err := os.WriteFile(out, []byte("old"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if code, _, stderr := invoke("verify", "-config", cfg, "-in", in, "-out", out); code != exitOK {
+		t.Fatalf("code = %d, stderr = %q", code, stderr)
+	}
+	if info, _ := os.Stat(out); info.Mode().Perm() != 0o600 {
+		t.Fatalf("mode = %v; an existing world-readable file must be tightened", info.Mode().Perm())
 	}
 }

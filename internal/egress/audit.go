@@ -7,18 +7,35 @@ import (
 	"time"
 )
 
+// Outcome is what the gate did with a connection.
+type Outcome string
+
+const (
+	// Allowed means the policy permitted the connection and it was attempted.
+	Allowed Outcome = "allowed"
+	// Denied means the policy refused it; nothing was sent.
+	Denied Outcome = "denied"
+	// Failed means the policy permitted it but the target could not be
+	// reached or did not answer.
+	Failed Outcome = "failed"
+)
+
 // Event records one connection decision made by the gate.
 type Event struct {
-	Time    time.Time `json:"time"`
-	Method  string    `json:"method"`
-	Target  string    `json:"target"`
-	Allowed bool      `json:"allowed"`
-	Reason  string    `json:"reason,omitempty"`
+	Time   time.Time `json:"time"`
+	Method string    `json:"method"`
+	Target string    `json:"target"`
+	// Allowed is false only when the policy refused the connection.
+	Allowed bool    `json:"allowed"`
+	Outcome Outcome `json:"outcome"`
+	Reason  string  `json:"reason,omitempty"`
 }
 
-// Sink receives audit events. Implementations must be safe for concurrent use.
+// Sink receives audit events. Implementations must be safe for concurrent
+// use. An error means the event was not recorded; the gate then refuses to
+// forward, because nothing may pass unaudited.
 type Sink interface {
-	Record(Event)
+	Record(Event) error
 }
 
 // JSONLSink writes one JSON object per line.
@@ -32,12 +49,11 @@ func NewJSONLSink(w io.Writer) *JSONLSink {
 	return &JSONLSink{enc: json.NewEncoder(w)}
 }
 
-// Record writes e. A write failure cannot be reported to the caller of the
-// proxied request, so it is dropped here; the proxy still enforces the policy.
-func (s *JSONLSink) Record(e Event) {
+// Record writes e.
+func (s *JSONLSink) Record(e Event) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	_ = s.enc.Encode(e)
+	return s.enc.Encode(e)
 }
 
 // MemorySink keeps events in memory, for tests and for run summaries.
@@ -47,10 +63,11 @@ type MemorySink struct {
 }
 
 // Record stores e.
-func (s *MemorySink) Record(e Event) {
+func (s *MemorySink) Record(e Event) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.events = append(s.events, e)
+	return nil
 }
 
 // Events returns a copy of everything recorded so far.

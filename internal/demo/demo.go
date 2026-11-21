@@ -62,6 +62,26 @@ func findings(at time.Time) []finding.Finding {
 			Verdicts: passed(at, "The body is a real environment file with a populated key, not a placeholder or an error page."),
 		},
 		{
+			ID: "demo-code-cmdi", Kind: finding.Static, Source: "semgrep", RuleID: "rules.python-command-injection",
+			Title: "python command injection", Severity: finding.SeverityHigh, Target: "shop/exports.py:41",
+			Description: "Request input reaches a shell command. Pass arguments as a list without a shell, and validate them against an allow-list.",
+			Location:    &finding.Location{File: "shop/exports.py", Line: 41, EndLine: 41},
+			AssetURL:    shop, CWE: []string{"cwe-78"}, Status: finding.Confirmed,
+			Evidence: finding.Evidence{
+				Code: "     37 | @app.route(\"/exports\")\n     38 | @login_required\n     39 | def export_orders():\n     40 |     fmt = request.args.get(\"format\", \"csv\")\n>    41 |     os.system(\"./bin/export --format \" + fmt)\n     42 |     return send_file(\"/tmp/export.\" + fmt)\n",
+				Trace: []finding.TraceStep{
+					{Role: "source", File: "shop/exports.py", Line: 40, Content: "request.args.get(\"format\", \"csv\")"},
+					{Role: "propagation", File: "shop/exports.py", Line: 40, Content: "fmt"},
+					{Role: "sink", File: "shop/exports.py", Line: 41, Content: "os.system(\"./bin/export --format \" + fmt)"},
+				},
+			},
+			Verdicts: verdicts(at,
+				[3]string{"evidence", "pass", "source located and read"},
+				[3]string{"scope", "pass", "file is inside the analysed source tree"},
+				[3]string{"reproduce", "pass", "reproduced 1 of 1 times"},
+				[3]string{"refute", "pass", "Line 40 reads the format parameter from the request and line 41 concatenates it into a shell command with no validation between them."}),
+		},
+		{
 			ID: "demo-xss", Source: "nuclei", RuleID: "reflected-xss", Title: "Reflected cross-site scripting in search",
 			Severity: finding.SeverityMedium, Target: shop + "/search", CWE: []string{"cwe-79"}, Status: finding.Unconfirmed,
 			Evidence: finding.Evidence{
@@ -148,6 +168,7 @@ func Run(id string, now time.Time) (record.Run, error) {
 		Tool: "vajra", GeneratedAt: now.UTC(),
 		Authorization: record.Authorization{Operator: "demo", Statement: "Sample data. No system was tested."},
 		Targets:       []string{shop},
+		SourceRoot:    "/srv/checkouts/shop",
 		Scope:         scope.Config{Hosts: []string{"shop.example.test"}, Ports: []int{443}},
 		Budget: record.BudgetReport{
 			Limits: budget.Limits{Tokens: 500000, Turns: 200, SandboxRuns: 100, DurationSeconds: 3600},

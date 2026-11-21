@@ -74,28 +74,57 @@ func TestParseReadsTagsAndCWEInEitherShape(t *testing.T) {
 	}
 }
 
-func TestParseReportsOversizedLines(t *testing.T) {
-	_, _, err := Parse(strings.NewReader(strings.Repeat("x", maxLineBytes+1)))
-	if err == nil {
-		t.Fatal("an oversized line was not reported")
+func TestParseSkipsAnOversizedLineAndKeepsTheRest(t *testing.T) {
+	huge := `{"template-id":"huge","response":"` + strings.Repeat("A", maxLineBytes) + `"}`
+	output := `{"template-id":"before","matched-at":"https://app.test/a"}` + "\n" + huge + "\n" +
+		`{"template-id":"after","matched-at":"https://app.test/b"}`
+
+	findings, skipped, err := Parse(strings.NewReader(output))
+
+	if err != nil || skipped != 1 || len(findings) != 2 || findings[0].RuleID != "before" || findings[1].RuleID != "after" {
+		t.Fatalf("findings = %d, skipped = %d, err = %v; one huge record must not cost the others", len(findings), skipped, err)
 	}
 }
 
+type failingReader struct{}
+
+func (failingReader) Read([]byte) (int, error) { return 0, errors.New("pipe closed") }
+
+func TestParseReportsAReadFailure(t *testing.T) {
+	if _, _, err := Parse(failingReader{}); err == nil {
+		t.Fatal("a read failure was not reported")
+	}
+}
+
+// fakeRunner answers template runs with result and canary runs with canary.
 type fakeRunner struct {
 	specs  []sandbox.Spec
 	result sandbox.Result
+	canary string
 	err    error
 }
 
+const canaryPath = "/opt/vajra/canary.yaml"
+
+// answering is what the canary prints when the target responds.
+const answering = `{"template-id":"vajra-canary","matched-at":"https://app.test"}`
+
 func (f *fakeRunner) Run(_ context.Context, spec sandbox.Spec) (sandbox.Result, error) {
 	f.specs = append(f.specs, spec)
-	return f.result, f.err
+	if f.err != nil {
+		return sandbox.Result{}, f.err
+	}
+	if slices.Contains(spec.Argv, canaryPath) {
+		return sandbox.Result{Stdout: []byte(f.canary)}, nil
+	}
+	return f.result, nil
 }
 
 func newScanner(runner sandbox.Runner) *Scanner {
 	return &Scanner{
 		Runner: runner, Image: "vajra-nuclei:local", TemplatesDir: "/opt/nuclei-templates",
 		Network: "vajra-task-net", ProxyURL: "http://gate:3128", Timeout: time.Minute,
+		CanaryTemplate: canaryPath,
 	}
 }
 
@@ -216,7 +245,7 @@ func TestReproduceReportsNoMatch(t *testing.T) {
 	}
 	for name, mutate := range cases {
 		t.Run(name, func(t *testing.T) {
-			runner := &fakeRunner{result: sandbox.Result{Stdout: []byte(sampleOutput)}}
+			runner := &fakeRunner{result: sandbox.Result{Stdout: []byte(sampleOutput)}, canary: answering}
 			f := candidate()
 			mutate(&f, runner)
 
@@ -225,7 +254,25 @@ func TestReproduceReportsNoMatch(t *testing.T) {
 			if err != nil || matched {
 				t.Fatalf("matched = %v, err = %v; want no match", matched, err)
 			}
+			if last := runner.specs[len(runner.specs)-1]; !slices.Contains(last.Argv, canaryPath) {
+				t.Fatal("a miss was reported without checking that the target answers")
+			}
 		})
+	}
+}
+
+func TestReproduceCannotTellWhenTheTargetDoesNotAnswer(t *testing.T) {
+	for name, canary := range map[string]string{
+		"silence":                  "",
+		"an answer from elsewhere": `{"template-id":"vajra-canary","matched-at":"https://other.test"}`,
+	} {
+		runner := &fakeRunner{result: sandbox.Result{}, canary: canary}
+
+		matched, err := newScanner(runner).Reproduce(context.Background(), candidate())
+
+		if err == nil || matched || !strings.Contains(err.Error(), "did not answer") {
+			t.Errorf("%s: matched = %v, err = %v; an unanswered re-test must be an error, not a miss", name, matched, err)
+		}
 	}
 }
 
@@ -279,6 +326,7 @@ func TestValidateNamesEachMissingSetting(t *testing.T) {
 	mutations := map[string]func(*Scanner){
 		"runner":       func(s *Scanner) { s.Runner = nil },
 		"image":        func(s *Scanner) { s.Image = "" },
+		"canary":       func(s *Scanner) { s.CanaryTemplate = "" },
 		"templates":    func(s *Scanner) { s.TemplatesDir = "" },
 		"network":      func(s *Scanner) { s.Network = "" },
 		"network none": func(s *Scanner) { s.Network = sandbox.NetworkNone },
@@ -297,7 +345,7 @@ func TestValidateNamesEachMissingSetting(t *testing.T) {
 	}
 	custom := newScanner(&fakeRunner{})
 	custom.RateLimit = 5
-	if args := strings.Join(custom.baseArgs(), " "); !strings.Contains(args, "-rate-limit 5") {
+	if args := strings.Join(custom.baseArgs(custom.TemplatesDir), " "); !strings.Contains(args, "-rate-limit 5") {
 		t.Errorf("args = %s", args)
 	}
 }

@@ -112,13 +112,14 @@ The gates and the verification pipeline. Nothing else is safe to build first.
 
 ### Phase 2: full coverage of an application
 
-| Loop | Delivers |
-|---|---|
-| 4 | SAST: Semgrep adapter, secrets and dependency scanning, source-to-sink verification |
-| 5 | SAST and DAST correlation: code findings steer live tests; live results confirm code findings |
-| 6 | Authenticated testing: login flows, session handling, role-based access checks across accounts |
-| 7 | Traffic capture: recording proxy, browser-driven crawling, evidence bound to exact exchanges |
-| 8 | API testing: OpenAPI and GraphQL import, authorisation and business-logic checks |
+| Loop | Delivers | State |
+|---|---|---|
+| 4a | SAST: Semgrep in a no-network sandbox, source read and confined by Vajra itself, code-review refuter, starter rules, code findings anchored to their service | done |
+| 4b | Secrets and dependency scanning | next |
+| 5 | SAST and DAST correlation: code findings steer live tests; live results confirm code findings | planned |
+| 6 | Authenticated testing: login flows, session handling, role-based access checks across accounts | planned |
+| 7 | Traffic capture: recording proxy, browser-driven crawling, evidence bound to exact exchanges | planned |
+| 8 | API testing: OpenAPI and GraphQL import, authorisation and business-logic checks | planned |
 
 ### Phase 3: autonomy under gates
 
@@ -150,6 +151,27 @@ The gates and the verification pipeline. Nothing else is safe to build first.
   is possible.
 - JSON configuration (no YAML dependency).
 - Licensed under AGPL-3.0.
+
+## Hardening from review
+
+An independent review of the core (2026-11-21) found no way to reach
+`confirmed` without passing every stage. Its findings, all now fixed and
+tested:
+
+- The task network is inspected before every live scan and must be internal.
+- A re-test that gets no answer is inconclusive, not a refutation. A canary
+  template tells the two apart, and the gate marks its own error responses.
+- Zoned, IPv4-compatible, NAT64, 6to4 and Teredo addresses are never targets.
+- The check, the DNS lookup and the connection all use one normalised host.
+- The time budget cuts off running tools and model calls.
+- The gate times out idle tunnels, logs before forwarding, and forwards
+  nothing if the audit log cannot be written.
+- Sandbox mounts are read-only unless stated; user IDs are parsed, not matched.
+- One oversized scanner record no longer discards a whole scan.
+
+Still open from that review: wildcards over public suffixes such as `*.co.uk`
+are accepted, leftover containers are labelled but not yet reaped, and scanner
+images are not pinned by digest.
 
 ## Open questions
 

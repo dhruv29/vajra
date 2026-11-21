@@ -22,7 +22,7 @@ func validSpec() Spec {
 func TestDockerArgsLockTheContainerDown(t *testing.T) {
 	spec := validSpec()
 	spec.Env = map[string]string{"HTTPS_PROXY": "http://gate:3128", "A": "1"}
-	spec.Mounts = []Mount{{Source: "/srv/src", Target: "/src", ReadOnly: true}}
+	spec.Mounts = []Mount{{Source: "/srv/src", Target: "/src"}, {Source: "/srv/out", Target: "/out", Writable: true}}
 	spec.Workdir = "/src"
 
 	args, err := DockerArgs(spec, "vajra-abc123")
@@ -42,6 +42,8 @@ func TestDockerArgsLockTheContainerDown(t *testing.T) {
 		"--user 65534:65534",
 		"--workdir /src",
 		"--mount type=bind,source=/srv/src,target=/src,readonly",
+		"--mount type=bind,source=/srv/out,target=/out --env",
+		"--label vajra.sandbox=1",
 		"--env A=1 --env HTTPS_PROXY=http://gate:3128",
 		"vajra-nuclei:local -u https://app.test",
 	} {
@@ -96,6 +98,11 @@ func TestValidateRejectsUnsafeSpecs(t *testing.T) {
 		"unclean mount source":        func(s *Spec) { s.Mounts = []Mount{{Source: "/srv/../etc", Target: "/src"}} },
 		"host root mount":             func(s *Spec) { s.Mounts = []Mount{{Source: "/", Target: "/host"}} },
 		"host etc mount":              func(s *Spec) { s.Mounts = []Mount{{Source: "/etc/ssh", Target: "/x"}} },
+		"docker data mount":           func(s *Spec) { s.Mounts = []Mount{{Source: "/var/lib/docker/volumes", Target: "/x"}} },
+		"root home mount":             func(s *Spec) { s.Mounts = []Mount{{Source: "/root/.ssh", Target: "/x"}} },
+		"whole home tree mount":       func(s *Spec) { s.Mounts = []Mount{{Source: "/home", Target: "/x"}} },
+		"whole Users tree mount":      func(s *Spec) { s.Mounts = []Mount{{Source: "/Users", Target: "/x"}} },
+		"whole var mount":             func(s *Spec) { s.Mounts = []Mount{{Source: "/var", Target: "/x"}} },
 		"docker socket mount":         func(s *Spec) { s.Mounts = []Mount{{Source: "/var/run/docker.sock", Target: "/d.sock"}} },
 		"relocated docker socket":     func(s *Spec) { s.Mounts = []Mount{{Source: "/home/u/.docker/run/docker.sock", Target: "/d.sock"}} },
 		"mount over root":             func(s *Spec) { s.Mounts = []Mount{{Source: "/srv/src", Target: "/"}} },
@@ -254,5 +261,59 @@ func TestCappedBufferKeepsOnlyTheFirstBytes(t *testing.T) {
 func TestNewDockerUsesTheRealCLI(t *testing.T) {
 	if NewDocker().exec == nil {
 		t.Fatal("no exec function")
+	}
+}
+
+func TestProjectDirectoriesUnderHomeCanBeMounted(t *testing.T) {
+	for _, source := range []string{"/home/dev/project", "/Users/dev/project", "/srv/app", "/var/folders/ab/T/tmp.x/src"} {
+		spec := validSpec()
+		spec.Mounts = []Mount{{Source: source, Target: "/src"}}
+		if _, err := DockerArgs(spec, "vajra-abc123"); err != nil {
+			t.Errorf("%s: %v", source, err)
+		}
+	}
+}
+
+// inspectDocker answers "docker network inspect" with fixed output.
+type inspectDocker struct {
+	output string
+	code   int
+	err    error
+	calls  [][]string
+}
+
+func (f *inspectDocker) exec(_ context.Context, args []string, stdout, _ io.Writer) (int, error) {
+	f.calls = append(f.calls, args)
+	_, _ = io.WriteString(stdout, f.output)
+	return f.code, f.err
+}
+
+func TestRequireInternalNetwork(t *testing.T) {
+	cases := []struct {
+		name    string
+		network string
+		fake    inspectDocker
+		ok      bool
+	}{
+		{"internal network", "vajra-task-net", inspectDocker{output: "true vajra-task-net\n"}, true},
+		{"ordinary network", "vajra-task-net", inspectDocker{output: "false vajra-task-net\n"}, false},
+		{"id prefix of another network", "0a1b2c", inspectDocker{output: "true some-other-net\n"}, false},
+		{"id of the bridge network", "f00dfeed", inspectDocker{output: "false bridge\n"}, false},
+		{"missing network", "vajra-task-net", inspectDocker{code: 1}, false},
+		{"docker unavailable", "vajra-task-net", inspectDocker{err: errors.New("no docker"), code: -1}, false},
+		{"host network", "host", inspectDocker{output: "true host\n"}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := tc.fake
+			err := (&Docker{exec: fake.exec}).RequireInternalNetwork(context.Background(), tc.network)
+			if tc.ok != (err == nil) {
+				t.Fatalf("err = %v; want ok=%v", err, tc.ok)
+			}
+		})
+	}
+	none := &inspectDocker{}
+	if err := (&Docker{exec: none.exec}).RequireInternalNetwork(context.Background(), NetworkNone); err != nil || len(none.calls) != 0 {
+		t.Fatalf("network none: err = %v, docker calls = %d", err, len(none.calls))
 	}
 }

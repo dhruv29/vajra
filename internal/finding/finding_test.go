@@ -67,3 +67,14 @@ func TestWithVerdictAndWithStatusDoNotModifyTheOriginal(t *testing.T) {
 		t.Fatal("two copies share the same backing array")
 	}
 }
+
+func TestSafeRelPath(t *testing.T) {
+	for path, want := range map[string]bool{
+		"a.py": true, "app/views.py": true, "-rf": true, "a..b/c.py": true,
+		"": false, "/etc/passwd": false, "..": false, "../x": false, "a/../../x": false, "a//b": false, "./a": false, "a\x00b": false,
+	} {
+		if got := SafeRelPath(path); got != want {
+			t.Errorf("SafeRelPath(%q) = %v; want %v", path, got, want)
+		}
+	}
+}

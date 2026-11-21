@@ -1,0 +1,22 @@
+id: vajra-canary
+
+info:
+  name: Vajra reachability canary
+  author: vajra
+  severity: info
+  description: >-
+    Matches any HTTP response that came from the target. Vajra runs it when a
+    finding does not reproduce, to tell "the target answered and the rule did
+    not match" from "the target did not answer at all". Responses the egress
+    gate wrote itself carry an X-Vajra-Gate header and do not count.
+
+http:
+  - method: GET
+    path:
+      - "{{BaseURL}}"
+    matchers:
+      - type: dsl
+        condition: and
+        dsl:
+          - "status_code >= 100"
+          - "!contains(to_lower(header), 'x-vajra-gate')"

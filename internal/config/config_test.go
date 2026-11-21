@@ -117,3 +117,89 @@ func TestLoadReadsAFile(t *testing.T) {
 		t.Fatal("a missing file was accepted")
 	}
 }
+
+func sourceSection(root string) map[string]any {
+	return map[string]any{
+		"root":    root,
+		"semgrep": map[string]any{"image": "vajra-semgrep:local", "rules_image_path": "/opt/semgrep-rules", "timeout_seconds": 600},
+	}
+}
+
+func TestSourceOnlyRunNeedsNoScopeOrScannerSettings(t *testing.T) {
+	m := map[string]any{
+		"authorization": map[string]any{"operator": "sec@example.test", "statement": "Our own code"},
+		"budget":        map[string]any{"tokens": 100000, "turns": 50, "sandbox_runs": 20, "duration_seconds": 1800},
+		"source":        sourceSection(t.TempDir()),
+	}
+
+	c, policy, err := Parse(strings.NewReader(encode(t, m)))
+
+	if err != nil {
+		t.Fatal(err)
+	}
+	if policy != nil {
+		t.Fatal("a code-only run must not get a network policy")
+	}
+	if c.Source == nil || c.Source.Semgrep.TimeoutSeconds != 600 || len(c.Targets) != 0 {
+		t.Fatalf("config = %+v", c)
+	}
+}
+
+func TestSourceAlongsideTargetsAndLinkedToAService(t *testing.T) {
+	m := validMap()
+	src := sourceSection(t.TempDir())
+	src["serves"] = "https://app.test"
+	m["source"] = src
+
+	c, policy, err := Parse(strings.NewReader(encode(t, m)))
+
+	if err != nil || policy == nil || c.Source.Serves != "https://app.test" {
+		t.Fatalf("config = %+v, policy = %v, err = %v", c.Source, policy, err)
+	}
+}
+
+func TestSourceValidation(t *testing.T) {
+	dir := t.TempDir()
+	file := filepath.Join(dir, "file.txt")
+	if err := os.WriteFile(file, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	semgrep := func(src map[string]any) map[string]any { return src["semgrep"].(map[string]any) }
+	cases := map[string]func(src map[string]any){
+		"relative root":        func(src map[string]any) { src["root"] = "src" },
+		"unclean root":         func(src map[string]any) { src["root"] = dir + "/../x" },
+		"missing root":         func(src map[string]any) { src["root"] = filepath.Join(dir, "nope") },
+		"root is a file":       func(src map[string]any) { src["root"] = file },
+		"serves outside scope": func(src map[string]any) { src["serves"] = "https://other.test" },
+		"serves is not a URL":  func(src map[string]any) { src["serves"] = "app.test" },
+		"no image":             func(src map[string]any) { semgrep(src)["image"] = "" },
+		"no timeout":           func(src map[string]any) { semgrep(src)["timeout_seconds"] = 0 },
+		"no rules":             func(src map[string]any) { delete(semgrep(src), "rules_image_path") },
+		"both rules":           func(src map[string]any) { semgrep(src)["rules_host_dir"] = "/srv/rules" },
+		"relative rules":       func(src map[string]any) { semgrep(src)["rules_image_path"] = "rules" },
+	}
+	for name, mutate := range cases {
+		t.Run(name, func(t *testing.T) {
+			m := validMap()
+			src := sourceSection(dir)
+			mutate(src)
+			m["source"] = src
+			if _, _, err := Parse(strings.NewReader(encode(t, m))); err == nil {
+				t.Fatal("Parse succeeded")
+			}
+		})
+	}
+}
+
+func TestSourceLinkedToAServiceNeedsAScope(t *testing.T) {
+	src := sourceSection(t.TempDir())
+	src["serves"] = "https://app.test"
+	m := map[string]any{
+		"authorization": map[string]any{"operator": "sec@example.test", "statement": "Our own code"},
+		"budget":        map[string]any{"tokens": 100000, "turns": 50, "sandbox_runs": 20, "duration_seconds": 1800},
+		"source":        src,
+	}
+	if _, _, err := Parse(strings.NewReader(encode(t, m))); err == nil {
+		t.Fatal("a service link without a scope was accepted")
+	}
+}

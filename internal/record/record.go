@@ -28,15 +28,17 @@ type BudgetReport struct {
 
 // Report is the verified output of a run.
 type Report struct {
-	Tool          string                 `json:"tool"`
-	GeneratedAt   time.Time              `json:"generated_at"`
-	Authorization Authorization          `json:"authorization"`
-	Targets       []string               `json:"targets"`
-	Scope         scope.Config           `json:"scope"`
-	Budget        BudgetReport           `json:"budget"`
-	Refuter       string                 `json:"refuter"`
-	Summary       map[finding.Status]int `json:"summary"`
-	Findings      []finding.Finding      `json:"findings"`
+	Tool          string        `json:"tool"`
+	GeneratedAt   time.Time     `json:"generated_at"`
+	Authorization Authorization `json:"authorization"`
+	Targets       []string      `json:"targets"`
+	// SourceRoot is the analysed source tree, when there was one.
+	SourceRoot string                 `json:"source_root,omitempty"`
+	Scope      scope.Config           `json:"scope"`
+	Budget     BudgetReport           `json:"budget"`
+	Refuter    string                 `json:"refuter"`
+	Summary    map[finding.Status]int `json:"summary"`
+	Findings   []finding.Finding      `json:"findings"`
 }
 
 // Run is a report enriched with the asset graph, blast radii and the record
@@ -69,6 +71,7 @@ func Build(id string, report Report, decl topology.Declaration, events []egress.
 	}
 	for _, f := range report.Findings {
 		b.AddURL(f.Target)
+		b.AddURL(f.AssetURL)
 	}
 	if err := b.AddDeclaration(decl); err != nil {
 		return Run{}, err

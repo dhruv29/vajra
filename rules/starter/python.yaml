@@ -1,0 +1,80 @@
+# Starter rules for Python web code. They are deliberately few and precise:
+# each one tracks untrusted request input to a dangerous call. Add your own
+# rules, or point source.semgrep.rules_host_dir at a larger rule set.
+rules:
+  - id: python-sql-injection
+    mode: taint
+    languages: [python]
+    severity: ERROR
+    message: >-
+      Request input reaches the text of a SQL query. Pass the value as a bound
+      parameter instead of building the query string from it.
+    metadata:
+      cwe: ["CWE-89: Improper Neutralization of Special Elements used in an SQL Command"]
+      category: security
+    pattern-sources:
+      - pattern-either:
+          - pattern: request.args.get(...)
+          - pattern: request.args[...]
+          - pattern: request.form.get(...)
+          - pattern: request.form[...]
+          - pattern: request.values.get(...)
+          - pattern: request.get_json(...)
+          - pattern: request.json
+    pattern-sinks:
+      - patterns:
+          - pattern-either:
+              - pattern: $DB.execute($QUERY, ...)
+              - pattern: $DB.executemany($QUERY, ...)
+              - pattern: $DB.executescript($QUERY, ...)
+          - focus-metavariable: $QUERY
+
+  - id: python-command-injection
+    mode: taint
+    languages: [python]
+    severity: ERROR
+    message: >-
+      Request input reaches a shell command. Pass arguments as a list without a
+      shell, and validate them against an allow-list.
+    metadata:
+      cwe: ["CWE-78: Improper Neutralization of Special Elements used in an OS Command"]
+      category: security
+    pattern-sources:
+      - pattern-either:
+          - pattern: request.args.get(...)
+          - pattern: request.args[...]
+          - pattern: request.form.get(...)
+          - pattern: request.form[...]
+          - pattern: request.values.get(...)
+          - pattern: request.get_json(...)
+          - pattern: request.json
+    pattern-sinks:
+      - pattern-either:
+          - pattern: os.system(...)
+          - pattern: os.popen(...)
+          - pattern: subprocess.$FUNC(..., shell=True, ...)
+
+  - id: python-path-traversal
+    mode: taint
+    languages: [python]
+    severity: WARNING
+    message: >-
+      Request input is used as a file path. Resolve the path and check that it
+      stays inside the intended directory before opening it.
+    metadata:
+      cwe: ["CWE-22: Improper Limitation of a Pathname to a Restricted Directory"]
+      category: security
+    pattern-sources:
+      - pattern-either:
+          - pattern: request.args.get(...)
+          - pattern: request.args[...]
+          - pattern: request.form.get(...)
+          - pattern: request.form[...]
+    pattern-sanitizers:
+      - pattern: werkzeug.utils.secure_filename(...)
+      - pattern: secure_filename(...)
+      - pattern: os.path.basename(...)
+    pattern-sinks:
+      - patterns:
+          - pattern: open($PATH, ...)
+          - focus-metavariable: $PATH
