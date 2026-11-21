@@ -72,9 +72,65 @@ wait_for_target() {
   fail "the lab target did not start answering through the gate"
 }
 
+# retry runs a command up to three times. Building the scanner image downloads
+# its templates, which now and then fails for reasons that have nothing to do
+# with this repository.
+retry() {
+  local attempt
+  for attempt in 1 2 3; do
+    "$@" && return 0
+    echo "attempt $attempt failed: $*" >&2
+    sleep 5
+  done
+  return 1
+}
+
+# wait_for_target blocks until the lab web server answers through the gate.
+# A container that has just been started is not listening yet, and a scan
+# that begins too early would find nothing and blame the target.
+wait_for_target() {
+  local attempt
+  for attempt in $(seq 1 40); do
+    if docker run --rm --network "$TASK_NET" -e http_proxy=http://gate:3128 "$PROBE_IMAGE" \
+      wget -q -T 5 -O /dev/null "http://target/" 2>/dev/null; then
+      return 0
+    fi
+    sleep 0.5
+  done
+  fail "the lab target did not start answering through the gate"
+}
+
+# retry runs a command up to three times. Building the scanner image downloads
+# its templates, which now and then fails for reasons that have nothing to do
+# with this repository.
+retry() {
+  local attempt
+  for attempt in 1 2 3; do
+    "$@" && return 0
+    echo "attempt $attempt failed: $*" >&2
+    sleep 5
+  done
+  return 1
+}
+
+# wait_for_target blocks until the lab web server answers through the gate.
+# A container that has just been started is not listening yet, and a scan
+# that begins too early would find nothing and blame the target.
+wait_for_target() {
+  local attempt
+  for attempt in $(seq 1 40); do
+    if docker run --rm --network "$TASK_NET" -e http_proxy=http://gate:3128 "$PROBE_IMAGE" \
+      wget -q -T 5 -O /dev/null "http://target/" 2>/dev/null; then
+      return 0
+    fi
+    sleep 0.5
+  done
+  fail "the lab target did not start answering through the gate"
+}
+
 echo "== building images"
 docker build -q -t vajra:local . >/dev/null
-retry docker build -q -t vajra-nuclei:local -f deploy/nuclei.Dockerfile deploy >/dev/null
+retry retry retry docker build -q -t vajra-nuclei:local -f deploy/nuclei.Dockerfile deploy >/dev/null
 docker build -q -t vajra-semgrep:local -f deploy/semgrep.Dockerfile deploy >/dev/null
 go build -o "$WORK/vajra" ./cmd/vajra
 
@@ -128,11 +184,20 @@ docker create --name "$GATE" --network "$TASK_NET" --network-alias gate \
 docker network connect "$LAB_NET" "$GATE"
 docker network connect "$OUT_NET" "$GATE"
 docker start "$GATE" >/dev/null
+# The log is read into a variable first. Piping it straight into "grep -q"
+# fails under pipefail whenever grep finds its match and exits while docker is
+# still writing the next line.
+gate_log=""
 for _ in $(seq 1 30); do
-  docker logs "$GATE" 2>&1 | grep -q "egress gate listening" && break
+  gate_log="$(docker logs "$GATE" 2>&1 || true)"
+  grep -q "egress gate listening" <<<"$gate_log" && break
   sleep 0.5
 done
-docker logs "$GATE" 2>&1 | grep -q "egress gate listening" || fail "the gate did not start: $(docker logs "$GATE" 2>&1 | tail -3)"
+grep -q "egress gate listening" <<<"$gate_log" || fail "the gate did not start: $gate_log"
+
+wait_for_target
+
+wait_for_target
 
 wait_for_target
 
@@ -149,12 +214,12 @@ pass "task container cannot reach the target except through the gate"
 
 denied="$(docker run --rm --network "$TASK_NET" -e http_proxy=http://gate:3128 "$PROBE_IMAGE" \
   wget -T 10 -O /dev/null http://example.com/ 2>&1 || true)"
-echo "$denied" | grep -q "403" || fail "the gate did not refuse an out-of-scope host: $denied"
+grep -q "403" <<<"$denied" || fail "the gate did not refuse an out-of-scope host: $denied"
 pass "gate refuses an out-of-scope host"
 
 allowed="$(docker run --rm --network "$TASK_NET" -e http_proxy=http://gate:3128 "$PROBE_IMAGE" \
   wget -q -T 10 -O - http://target/ 2>&1 || true)"
-echo "$allowed" | grep -q "lab" || fail "the gate did not forward an in-scope request: $allowed"
+grep -q "lab" <<<"$allowed" || fail "the gate did not forward an in-scope request: $allowed"
 pass "gate forwards an in-scope request"
 
 echo "== scan"
@@ -166,8 +231,8 @@ pass "scan found the exposure, reproduced it twice, and left it unconfirmed with
 
 echo "== audit"
 audit="$(cat "$WORK/audit/audit.jsonl")"
-echo "$audit" | grep -q '"target":"example.com:80","allowed":false' || fail "the denial is missing from the audit log"
-echo "$audit" | grep -q '"target":"target:80","allowed":true' || fail "the allowed requests are missing from the audit log"
+grep -q '"target":"example.com:80","allowed":false' <<<"$audit" || fail "the denial is missing from the audit log"
+grep -q '"target":"target:80","allowed":true' <<<"$audit" || fail "the allowed requests are missing from the audit log"
 pass "audit log records allowed and denied connections"
 
 echo "== saved run and reports"
@@ -276,6 +341,8 @@ NGINXEOF
 chmod -R a+rX "$WORK/app" "$WORK/nginx.conf"
 docker run -d --name "$TARGET" --network "$LAB_NET" --network-alias target \
   -v "$WORK/app:/usr/share/nginx/html:ro" -v "$WORK/nginx.conf:/etc/nginx/conf.d/default.conf:ro" nginx:alpine >/dev/null
+wait_for_target
+wait_for_target
 wait_for_target
 cat > "$WORK/openapi.json" <<'APIEOF'
 {
