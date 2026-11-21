@@ -1,0 +1,8 @@
+/vajra
+/bin/
+/data/
+*.jsonl
+report*.json
+run.local.json
+.env
+.DS_Store

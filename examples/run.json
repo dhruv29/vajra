@@ -1,0 +1,36 @@
+{
+  "authorization": {
+    "operator": "you@example.com",
+    "statement": "I own this application, or hold written permission to test it."
+  },
+  "scope": {
+    "hosts": ["app.example.com"],
+    "cidrs": [],
+    "ports": [443]
+  },
+  "budget": {
+    "tokens": 500000,
+    "turns": 200,
+    "sandbox_runs": 100,
+    "duration_seconds": 3600
+  },
+  "targets": ["https://app.example.com"],
+  "sandbox": {
+    "network": "vajra-task-net",
+    "proxy_url": "http://gate:3128"
+  },
+  "nuclei": {
+    "image": "vajra-nuclei:local",
+    "templates_dir": "/opt/nuclei-templates",
+    "timeout_seconds": 1800,
+    "rate_limit": 20
+  },
+  "verify": {
+    "reproduce_attempts": 2
+  },
+  "refuter": {
+    "provider": "anthropic",
+    "model": "claude-opus-5-5",
+    "api_key_env": "ANTHROPIC_API_KEY"
+  }
+}

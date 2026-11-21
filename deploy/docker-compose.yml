@@ -1,0 +1,34 @@
+# Starts the egress gate and the two networks.
+#
+#   tasks   internal: no route out. Task containers attach here and can reach
+#           only the gate.
+#   egress  ordinary network. Only the gate is attached, so it is the single
+#           way out.
+#
+# Usage: VAJRA_CONFIG=/absolute/path/run.json docker compose -f deploy/docker-compose.yml up -d --build
+name: vajra
+
+networks:
+  tasks:
+    name: vajra-task-net
+    internal: true
+  egress:
+    name: vajra-egress
+
+services:
+  gate:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    image: vajra:local
+    command: ["gate", "-config", "/etc/vajra/run.json", "-listen", ":3128"]
+    volumes:
+      - "${VAJRA_CONFIG:?set VAJRA_CONFIG to the absolute path of your run configuration}:/etc/vajra/run.json:ro"
+    networks:
+      tasks:
+        aliases: [gate]
+      egress: {}
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    restart: unless-stopped
