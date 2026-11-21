@@ -233,7 +233,7 @@ func runGate(ctx context.Context, args []string, stderr io.Writer) error {
 		return err
 	}
 	fmt.Fprintf(stderr, "vajra: egress gate listening on %s\n", listener.Addr())
-	return app.ServeGate(ctx, policy, listener, audit)
+	return app.ServeGate(ctx, policy, listener, nil, audit)
 }
 
 func saveRun(report app.Report, cfg config.Config, dataDir, auditPath string, started time.Time) (string, error) {

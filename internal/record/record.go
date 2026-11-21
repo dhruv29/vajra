@@ -6,10 +6,12 @@ import (
 	"sort"
 	"time"
 
+	"github.com/dhruv29/vajra/internal/agent"
 	"github.com/dhruv29/vajra/internal/blast"
 	"github.com/dhruv29/vajra/internal/budget"
 	"github.com/dhruv29/vajra/internal/egress"
 	"github.com/dhruv29/vajra/internal/finding"
+	"github.com/dhruv29/vajra/internal/osv"
 	"github.com/dhruv29/vajra/internal/scope"
 	"github.com/dhruv29/vajra/internal/topology"
 )
@@ -26,6 +28,29 @@ type BudgetReport struct {
 	Usage  budget.Usage  `json:"usage"`
 }
 
+// Activity records what a run did besides scanning the listed targets.
+type Activity struct {
+	// DiscoveredHosts are names found under wildcard scope entries.
+	DiscoveredHosts []string `json:"discovered_hosts,omitempty"`
+	// RejectedHosts resolve, but to addresses outside the scope.
+	RejectedHosts []string `json:"rejected_hosts,omitempty"`
+	// Endpoints are URLs found by crawling.
+	Endpoints      []string `json:"endpoints,omitempty"`
+	PagesCrawled   int      `json:"pages_crawled,omitempty"`
+	CrawlTruncated bool     `json:"crawl_truncated,omitempty"`
+	// SkippedOperations are API operations that could not be tested.
+	SkippedOperations []string `json:"skipped_operations,omitempty"`
+	// Packages is the dependency inventory, kept so that advisories published
+	// later can be matched without scanning again.
+	Packages []osv.Package `json:"packages,omitempty"`
+	// AgentSteps is the autonomous explorer's timeline.
+	AgentSteps   []agent.Step `json:"agent_steps,omitempty"`
+	AgentStopped string       `json:"agent_stopped,omitempty"`
+	AgentSummary string       `json:"agent_summary,omitempty"`
+	// Notes are things the operator should know that are not findings.
+	Notes []string `json:"notes,omitempty"`
+}
+
 // Report is the verified output of a run.
 type Report struct {
 	Tool          string        `json:"tool"`
@@ -39,6 +64,7 @@ type Report struct {
 	Refuter    string                 `json:"refuter"`
 	Summary    map[finding.Status]int `json:"summary"`
 	Findings   []finding.Finding      `json:"findings"`
+	Activity   Activity               `json:"activity"`
 }
 
 // Run is a report enriched with the asset graph, blast radii and the record
@@ -48,6 +74,8 @@ type Run struct {
 	Report Report         `json:"report"`
 	Graph  topology.Graph `json:"graph"`
 	Radii  []blast.Radius `json:"radii"`
+	// Chains are paths that combine several confirmed findings.
+	Chains []blast.Chain `json:"chains"`
 	// Reach is nil when no gate audit log was supplied.
 	Reach *egress.Reach `json:"reach,omitempty"`
 }
@@ -73,6 +101,12 @@ func Build(id string, report Report, decl topology.Declaration, events []egress.
 		b.AddURL(f.Target)
 		b.AddURL(f.AssetURL)
 	}
+	for _, endpoint := range report.Activity.Endpoints {
+		b.AddURL(endpoint)
+	}
+	for _, host := range report.Activity.DiscoveredHosts {
+		b.AddURL("https://" + host)
+	}
 	if err := b.AddDeclaration(decl); err != nil {
 		return Run{}, err
 	}
@@ -81,8 +115,9 @@ func Build(id string, report Report, decl topology.Declaration, events []egress.
 	for _, f := range report.Findings {
 		radii = append(radii, blast.Compute(graph, f))
 	}
+	chains := blast.Chains(graph, report.Findings, radii)
 	sort.SliceStable(radii, func(i, j int) bool { return radii[i].Score > radii[j].Score })
-	run := Run{ID: id, Report: report, Graph: graph, Radii: radii}
+	run := Run{ID: id, Report: report, Graph: graph, Radii: radii, Chains: chains}
 	if events != nil {
 		reach := egress.Summarize(events)
 		run.Reach = &reach

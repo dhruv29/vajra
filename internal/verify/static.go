@@ -37,3 +37,17 @@ func (SourceScopeStage) Check(_ context.Context, f finding.Finding) (finding.Out
 	}
 	return finding.Pass, "file is inside the analysed source tree"
 }
+
+// PackageEvidenceStage requires a dependency finding to name the package and
+// version it is about.
+type PackageEvidenceStage struct{}
+
+func (PackageEvidenceStage) Name() string               { return "evidence" }
+func (PackageEvidenceStage) FailStatus() finding.Status { return finding.Unconfirmed }
+
+func (PackageEvidenceStage) Check(_ context.Context, f finding.Finding) (finding.Outcome, string) {
+	if len(f.Evidence.Extracted) == 0 || f.Evidence.Extracted[0] == "" {
+		return finding.Fail, "the finding does not name a package and version"
+	}
+	return finding.Pass, "package and version identified: " + f.Evidence.Extracted[0]
+}

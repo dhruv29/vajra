@@ -67,3 +67,27 @@ func TestSourceRouterSendsEachFindingBackToItsScanner(t *testing.T) {
 		}
 	}
 }
+
+func TestPackageEvidenceStage(t *testing.T) {
+	stage := PackageEvidenceStage{}
+	ok := finding.Finding{Evidence: finding.Evidence{Extracted: []string{"npm/lodash@4.17.20"}}}
+	if outcome, reason := stage.Check(context.Background(), ok); outcome != finding.Pass || reason == "" {
+		t.Fatalf("outcome = %s", outcome)
+	}
+	for _, bad := range []finding.Finding{{}, {Evidence: finding.Evidence{Extracted: []string{""}}}} {
+		if outcome, _ := stage.Check(context.Background(), bad); outcome != finding.Fail {
+			t.Fatalf("outcome = %s; a finding that names no package must fail", outcome)
+		}
+	}
+	if stage.Name() != "evidence" || stage.FailStatus() != finding.Unconfirmed {
+		t.Fatal("stage identity is wrong")
+	}
+}
+
+func TestReproduceStageWithoutABudgetStillRuns(t *testing.T) {
+	r := &fakeReproducer{results: []bool{true}}
+	stage := ReproduceStage{Reproducer: r, Attempts: 2}
+	if outcome, _ := stage.Check(context.Background(), staticFinding()); outcome != finding.Pass || r.calls != 2 {
+		t.Fatalf("outcome = %s, calls = %d", outcome, r.calls)
+	}
+}

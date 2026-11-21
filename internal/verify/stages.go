@@ -83,6 +83,7 @@ type Reproducer interface {
 
 // ReproduceStage re-runs the finding and requires every attempt to match. A
 // result that appears once and not again is noise, not a vulnerability.
+// Budget may be nil when the runs are charged elsewhere.
 type ReproduceStage struct {
 	Reproducer Reproducer
 	Attempts   int
@@ -97,8 +98,10 @@ func (s ReproduceStage) Check(ctx context.Context, f finding.Finding) (finding.O
 		return finding.Inconclusive, "no reproduction attempts are configured"
 	}
 	for attempt := 1; attempt <= s.Attempts; attempt++ {
-		if err := s.Budget.SpendRun(); err != nil {
-			return finding.Inconclusive, err.Error()
+		if s.Budget != nil {
+			if err := s.Budget.SpendRun(); err != nil {
+				return finding.Inconclusive, err.Error()
+			}
 		}
 		matched, err := s.Reproducer.Reproduce(ctx, f)
 		if err != nil {

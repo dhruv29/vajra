@@ -349,3 +349,14 @@ func TestValidateNamesEachMissingSetting(t *testing.T) {
 		t.Errorf("args = %s", args)
 	}
 }
+
+func TestConfiguredHeadersAreSentInAStableOrder(t *testing.T) {
+	s := newScanner(&fakeRunner{})
+	s.Headers = map[string]string{"X-Tenant": "t1", "Authorization": "Bearer abc"}
+
+	joined := strings.Join(s.baseArgs(s.TemplatesDir), "|")
+
+	if !strings.Contains(joined, "-header|Authorization: Bearer abc|-header|X-Tenant: t1") {
+		t.Fatalf("args = %s", joined)
+	}
+}

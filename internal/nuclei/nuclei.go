@@ -12,6 +12,7 @@ import (
 	"io"
 	"net/url"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -176,6 +177,8 @@ type Scanner struct {
 	// CanaryTemplate is a template inside the image that matches any HTTP
 	// response. It is run when a finding does not reproduce.
 	CanaryTemplate string
+	// Headers are sent with every request, for scanning as a test account.
+	Headers map[string]string
 }
 
 // Validate reports the first missing setting.
@@ -295,7 +298,7 @@ func (s *Scanner) baseArgs(templates string) []string {
 	if rate <= 0 {
 		rate = defaultRateLimit
 	}
-	return []string{
+	args := []string{
 		"-jsonl", "-silent", "-no-color",
 		"-disable-update-check", // a task has no route to the update server
 		"-no-interactsh",        // out-of-band callbacks would leave the scope
@@ -303,6 +306,15 @@ func (s *Scanner) baseArgs(templates string) []string {
 		"-proxy", s.ProxyURL,
 		"-rate-limit", strconv.Itoa(rate),
 	}
+	names := make([]string, 0, len(s.Headers))
+	for name := range s.Headers {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		args = append(args, "-header", name+": "+s.Headers[name])
+	}
+	return args
 }
 
 func (s *Scanner) run(ctx context.Context, args []string) ([]finding.Finding, error) {

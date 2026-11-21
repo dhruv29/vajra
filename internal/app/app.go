@@ -1,5 +1,5 @@
-// Package app wires the gates, the scanner and the verification pipeline into
-// the operations the command line exposes.
+// Package app wires the gates, the scanners and the verification pipeline
+// into the operations the command line exposes.
 package app
 
 import (
@@ -13,17 +13,16 @@ import (
 	"sort"
 	"time"
 
-	"github.com/dhruv29/vajra/internal/budget"
+	"github.com/dhruv29/vajra/internal/agent"
 	"github.com/dhruv29/vajra/internal/config"
 	"github.com/dhruv29/vajra/internal/egress"
 	"github.com/dhruv29/vajra/internal/finding"
 	"github.com/dhruv29/vajra/internal/nuclei"
+	"github.com/dhruv29/vajra/internal/recon"
 	"github.com/dhruv29/vajra/internal/record"
-	"github.com/dhruv29/vajra/internal/refute"
 	"github.com/dhruv29/vajra/internal/report"
 	"github.com/dhruv29/vajra/internal/sandbox"
 	"github.com/dhruv29/vajra/internal/scope"
-	"github.com/dhruv29/vajra/internal/semgrep"
 	"github.com/dhruv29/vajra/internal/store"
 	"github.com/dhruv29/vajra/internal/verify"
 )
@@ -38,159 +37,29 @@ const (
 type Deps struct {
 	Runner sandbox.Runner
 	// CheckNetwork confirms that the task network has no route out except the
-	// gate. It is required whenever live targets are configured.
+	// gate. It is required whenever anything is tested over the network.
 	CheckNetwork func(ctx context.Context, name string) error
 	Getenv       func(string) string
 	Now          func() time.Time
-	// ModelBaseURL and ModelClient override the refuter's endpoint in tests.
+	// Resolver is used for host discovery. Nil means the system resolver.
+	Resolver recon.Resolver
+	// Approve is asked before the agent sends a request that could change
+	// data. Nil means every such request is refused.
+	Approve agent.Approver
+	// Stop is polled by the agent between steps; true ends it cleanly.
+	Stop func() bool
+	// ReadFile reads the API description. Nil means os.ReadFile.
+	ReadFile func(path string) ([]byte, error)
+	// ModelBaseURL, ModelClient and OSVBaseURL override endpoints in tests.
 	ModelBaseURL string
 	ModelClient  *http.Client
+	OSVBaseURL   string
 }
 
 // Report is the verified output of a run.
 type Report = record.Report
 
-// run holds the assembled parts of one run. The dynamic parts are nil when no
-// targets are configured, and the static parts when no source tree is.
-type run struct {
-	cfg             config.Config
-	deps            Deps
-	budget          *budget.Budget
-	nuclei          *nuclei.Scanner
-	dynamicPipeline *verify.Pipeline
-	semgrep         *semgrep.Scanner
-	staticPipeline  *verify.Pipeline
-}
-
-// staticReproduceAttempts is one because static analysis is deterministic:
-// the same code and rules give the same answer every time.
-const staticReproduceAttempts = 1
-
-func assemble(cfg config.Config, policy *scope.Policy, deps Deps) (*run, error) {
-	if deps.Runner == nil || deps.Getenv == nil {
-		return nil, errors.New("app: a sandbox runner and an environment lookup are required")
-	}
-	if deps.Now == nil {
-		deps.Now = time.Now
-	}
-	b, err := budget.New(cfg.Budget, deps.Now)
-	if err != nil {
-		return nil, err
-	}
-	refuter, err := newRefuter(cfg.Refuter, deps, b)
-	if err != nil {
-		return nil, err
-	}
-	refuteStage := verify.RefuteStage{Refuter: refuter, Budget: b}
-	if cfg.Refuter.Provider == config.RefuterNone {
-		refuteStage.Budget = nil // no model call is made, so no turn is charged
-	}
-	// Every sandbox run is cut off at the run's remaining time, so the duration
-	// limit holds even while a tool is still working.
-	deps.Runner = budgetRunner{inner: deps.Runner, budget: b}
-	r := &run{cfg: cfg, deps: deps, budget: b}
-	if len(cfg.Targets) > 0 {
-		if err := r.addDynamic(policy, refuteStage); err != nil {
-			return nil, err
-		}
-	}
-	if cfg.Source != nil {
-		if err := r.addStatic(refuteStage); err != nil {
-			return nil, err
-		}
-	}
-	return r, nil
-}
-
-// budgetRunner refuses a sandbox run when the time budget is spent and
-// shortens its timeout to the time that is left.
-type budgetRunner struct {
-	inner  sandbox.Runner
-	budget *budget.Budget
-}
-
-func (b budgetRunner) Run(ctx context.Context, spec sandbox.Spec) (sandbox.Result, error) {
-	left := b.budget.Remaining()
-	if left <= 0 {
-		return sandbox.Result{}, &budget.Exhausted{Resource: "duration"}
-	}
-	if spec.Timeout > left {
-		spec.Timeout = left
-	}
-	return b.inner.Run(ctx, spec)
-}
-
-// preflight checks, before anything is scanned, that the task network really
-// is closed off.
-func (r *run) preflight(ctx context.Context) error {
-	if r.nuclei == nil {
-		return nil
-	}
-	return r.deps.CheckNetwork(ctx, r.cfg.Sandbox.Network)
-}
-
-func (r *run) addDynamic(policy *scope.Policy, refuteStage verify.RefuteStage) error {
-	if policy == nil {
-		return errors.New("app: targets need a scope")
-	}
-	if r.deps.CheckNetwork == nil {
-		return errors.New("app: a task-network check is required when targets are configured")
-	}
-	cfg := r.cfg
-	r.nuclei = &nuclei.Scanner{
-		Runner: r.deps.Runner, Image: cfg.Nuclei.Image, TemplatesDir: cfg.Nuclei.TemplatesDir,
-		Network: cfg.Sandbox.Network, ProxyURL: cfg.Sandbox.ProxyURL,
-		Timeout: time.Duration(cfg.Nuclei.TimeoutSeconds) * time.Second, RateLimit: cfg.Nuclei.RateLimit,
-		CanaryTemplate: cfg.Nuclei.CanaryTemplate,
-	}
-	if err := r.nuclei.Validate(); err != nil {
-		return err
-	}
-	var err error
-	r.dynamicPipeline, err = verify.NewPipeline(r.deps.Now,
-		verify.EvidenceStage{},
-		verify.ScopeStage{Policy: policy},
-		verify.ReproduceStage{Reproducer: r.nuclei, Attempts: cfg.Verify.ReproduceAttempts, Budget: r.budget},
-		refuteStage,
-	)
-	return err
-}
-
-func (r *run) addStatic(refuteStage verify.RefuteStage) error {
-	src := r.cfg.Source
-	r.semgrep = &semgrep.Scanner{
-		Runner: r.deps.Runner, Image: src.Semgrep.Image, SourceRoot: src.Root,
-		RulesHostDir: src.Semgrep.RulesHostDir, RulesImagePath: src.Semgrep.RulesImagePath,
-		AssetURL: src.Serves, Timeout: time.Duration(src.Semgrep.TimeoutSeconds) * time.Second,
-	}
-	if err := r.semgrep.Validate(); err != nil {
-		return err
-	}
-	var err error
-	r.staticPipeline, err = verify.NewPipeline(r.deps.Now,
-		verify.CodeEvidenceStage{},
-		verify.SourceScopeStage{},
-		verify.ReproduceStage{Reproducer: r.semgrep, Attempts: staticReproduceAttempts, Budget: r.budget},
-		refuteStage,
-	)
-	return err
-}
-
-func newRefuter(cfg config.Refuter, deps Deps, b *budget.Budget) (verify.Refuter, error) {
-	if cfg.Provider == config.RefuterNone {
-		return refute.None{}, nil
-	}
-	key := deps.Getenv(cfg.APIKeyEnv)
-	if key == "" {
-		return nil, fmt.Errorf("app: the refuter needs an API key in the %s environment variable", cfg.APIKeyEnv)
-	}
-	return refute.NewAnthropic(refute.Options{
-		APIKey: key, Model: cfg.Model, BaseURL: deps.ModelBaseURL, Client: deps.ModelClient, Budget: b,
-	})
-}
-
-// Scan runs every configured scanner (live testing of the targets, analysis
-// of the source tree, or both) and verifies every result.
+// Scan runs everything the configuration enables and verifies every result.
 func Scan(ctx context.Context, cfg config.Config, policy *scope.Policy, deps Deps) (Report, error) {
 	r, err := assemble(cfg, policy, deps)
 	if err != nil {
@@ -199,26 +68,9 @@ func Scan(ctx context.Context, cfg config.Config, policy *scope.Policy, deps Dep
 	if err := r.preflight(ctx); err != nil {
 		return Report{}, err
 	}
-	var candidates []finding.Finding
-	if r.nuclei != nil {
-		if err := r.budget.SpendRun(); err != nil {
-			return Report{}, err
-		}
-		found, err := r.nuclei.Scan(ctx, cfg.Targets)
-		if err != nil {
-			return Report{}, err
-		}
-		candidates = append(candidates, found...)
-	}
-	if r.semgrep != nil {
-		if err := r.budget.SpendRun(); err != nil {
-			return Report{}, err
-		}
-		found, err := r.semgrep.Scan(ctx)
-		if err != nil {
-			return Report{}, err
-		}
-		candidates = append(candidates, found...)
+	candidates, err := r.collect(ctx)
+	if err != nil {
+		return Report{}, err
 	}
 	return r.verify(ctx, candidates), nil
 }
@@ -239,15 +91,19 @@ func VerifyOutput(ctx context.Context, cfg config.Config, policy *scope.Policy, 
 	if err != nil {
 		return Report{}, err
 	}
-	return r.verify(ctx, candidates), nil
+	return r.verify(ctx, r.redact(candidates)), nil
 }
 
 // pipelineFor picks the verification pipeline for a finding's kind.
 func (r *run) pipelineFor(f finding.Finding) *verify.Pipeline {
-	if f.Kind == finding.Static {
+	switch f.Kind {
+	case finding.Static:
 		return r.staticPipeline
+	case finding.Dependency:
+		return r.dependencyPipeline
+	default:
+		return r.dynamicPipeline
 	}
-	return r.dynamicPipeline
 }
 
 func (r *run) verify(ctx context.Context, candidates []finding.Finding) Report {
@@ -265,6 +121,7 @@ func (r *run) verify(ctx context.Context, candidates []finding.Finding) Report {
 		}
 		verified = append(verified, f)
 	}
+	verified = corroborate(verified)
 	sortFindings(verified)
 	summary := map[finding.Status]int{}
 	for _, f := range verified {
@@ -278,13 +135,14 @@ func (r *run) verify(ctx context.Context, candidates []finding.Finding) Report {
 		Tool:          "vajra",
 		GeneratedAt:   r.deps.Now().UTC(),
 		Authorization: record.Authorization(r.cfg.Authorization),
-		Targets:       r.cfg.Targets,
+		Targets:       r.targets,
 		SourceRoot:    sourceRoot,
 		Scope:         r.cfg.Scope,
 		Budget:        record.BudgetReport{Limits: r.budget.Limits(), Usage: r.budget.Usage()},
 		Refuter:       r.cfg.Refuter.Provider,
 		Summary:       summary,
 		Findings:      verified,
+		Activity:      r.activity,
 	}
 }
 
@@ -321,26 +179,45 @@ func sortFindings(findings []finding.Finding) {
 	})
 }
 
-// ServeGate runs the egress proxy on listener until ctx is cancelled. Every
-// connection decision is written to audit as one JSON object per line.
-func ServeGate(ctx context.Context, policy *scope.Policy, listener net.Listener, audit io.Writer) error {
+// ServeGate runs the egress gate until ctx is cancelled. listener serves the
+// HTTP proxy. socks, when not nil, also serves SOCKS5 for tools that speak
+// raw TCP; both enforce the same policy and write to the same audit log, one
+// JSON object per line.
+func ServeGate(ctx context.Context, policy *scope.Policy, listener, socks net.Listener, audit io.Writer) error {
 	guard, err := egress.NewGuard(policy, nil, nil)
 	if err != nil {
 		return err
 	}
-	proxy, err := egress.NewProxy(guard, egress.NewJSONLSink(audit))
+	sink := egress.NewJSONLSink(audit)
+	proxy, err := egress.NewProxy(guard, sink)
 	if err != nil {
 		return err
 	}
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	stopped := make(chan error, 2)
 	server := &http.Server{Handler: proxy, ReadHeaderTimeout: gateReadHeaderTimeout, IdleTimeout: gateIdleTimeout}
-	stopped := make(chan error, 1)
 	go func() { stopped <- server.Serve(listener) }()
+	if socks != nil {
+		socksServer, err := egress.NewSOCKS5(guard, sink)
+		if err != nil {
+			return err
+		}
+		go func() { stopped <- socksServer.Serve(ctx, socks) }()
+	}
 	select {
 	case err := <-stopped:
+		// One front end stopping takes the gate down: a half-working gate
+		// would fail in confusing ways.
+		cancel()
+		_ = server.Close()
+		if err == nil {
+			err = errors.New("app: a gate listener stopped unexpectedly")
+		}
 		return err
 	case <-ctx.Done():
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), gateShutdownTimeout)
-		defer cancel()
+		shutdownCtx, stop := context.WithTimeout(context.Background(), gateShutdownTimeout)
+		defer stop()
 		if err := server.Shutdown(shutdownCtx); err != nil {
 			return server.Close()
 		}

@@ -175,8 +175,9 @@ func TestScanVerifiesEveryCandidateAndSortsTheReport(t *testing.T) {
 	}
 	// 1 scan + flaky (1, stops) + real-issue (2) + false-alarm (2) + worse-issue (2); none for out-of-scope.
 	// The miss on "flaky" adds one canary run to check the target answers.
-	if runner.runs != 9 || report.Budget.Usage.SandboxRuns != 8 {
-		t.Errorf("sandbox runs = %d, charged = %d; want 9 and 8", runner.runs, report.Budget.Usage.SandboxRuns)
+	// Every sandbox run is charged, wherever it was started.
+	if runner.runs != 9 || report.Budget.Usage.SandboxRuns != 9 {
+		t.Errorf("sandbox runs = %d, charged = %d; want 9 and 9", runner.runs, report.Budget.Usage.SandboxRuns)
 	}
 	if report.Budget.Usage.Turns != 3 || report.Budget.Usage.Tokens != 3*550 {
 		t.Errorf("usage = %+v; want 3 model turns", report.Budget.Usage)
@@ -274,7 +275,7 @@ func TestServeGateEnforcesScopeAndAudits(t *testing.T) {
 	var audit syncBuffer
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
-	go func() { done <- ServeGate(ctx, policy, listener, &audit) }()
+	go func() { done <- ServeGate(ctx, policy, listener, nil, &audit) }()
 
 	proxyURL, _ := url.Parse("http://" + listener.Addr().String())
 	client := &http.Client{Transport: &http.Transport{Proxy: http.ProxyURL(proxyURL)}}
@@ -301,10 +302,10 @@ func TestServeGateReturnsWhenTheListenerFails(t *testing.T) {
 	listener, _ := net.Listen("tcp", "127.0.0.1:0")
 	listener.Close()
 
-	if err := ServeGate(context.Background(), policy, listener, io.Discard); err == nil {
+	if err := ServeGate(context.Background(), policy, listener, nil, io.Discard); err == nil {
 		t.Fatal("ServeGate did not report a dead listener")
 	}
-	if err := ServeGate(context.Background(), nil, listener, io.Discard); err == nil {
+	if err := ServeGate(context.Background(), nil, listener, nil, io.Discard); err == nil {
 		t.Fatal("ServeGate accepted a nil policy")
 	}
 }

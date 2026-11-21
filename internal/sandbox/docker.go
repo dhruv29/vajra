@@ -170,3 +170,24 @@ func (d *Docker) RequireInternalNetwork(ctx context.Context, name string) error 
 	}
 	return nil
 }
+
+// Cleanup force-removes containers left behind by an interrupted run and
+// returns how many it removed. Only containers that carry Vajra's label are
+// touched.
+func (d *Docker) Cleanup(ctx context.Context) (int, error) {
+	var stdout, stderr cappedBuffer
+	stdout.limit, stderr.limit = inspectOutputCap*16, inspectOutputCap
+	code, err := d.exec(ctx, []string{"ps", "--all", "--quiet", "--filter", "label=" + containerTag}, nil, &stdout, &stderr)
+	if err != nil || code != 0 {
+		return 0, fmt.Errorf("sandbox: list leftover containers: exit %d: %v", code, err)
+	}
+	ids := strings.Fields(stdout.buf.String())
+	if len(ids) == 0 {
+		return 0, nil
+	}
+	code, err = d.exec(ctx, append([]string{"rm", "--force"}, ids...), nil, io.Discard, io.Discard)
+	if err != nil || code != 0 {
+		return 0, fmt.Errorf("sandbox: remove leftover containers: exit %d: %v", code, err)
+	}
+	return len(ids), nil
+}

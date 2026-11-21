@@ -344,3 +344,46 @@ func TestRunPassesStandardInputOnlyWhenGiven(t *testing.T) {
 		t.Fatal("standard input was left open for a tool that was given none")
 	}
 }
+
+// cleanupDocker answers "ps" with ids and records the "rm" call.
+type cleanupDocker struct {
+	ids    string
+	psCode int
+	rmCode int
+	calls  [][]string
+}
+
+func (f *cleanupDocker) exec(_ context.Context, args []string, _ io.Reader, stdout, _ io.Writer) (int, error) {
+	f.calls = append(f.calls, args)
+	if args[0] == "ps" {
+		_, _ = io.WriteString(stdout, f.ids)
+		return f.psCode, nil
+	}
+	return f.rmCode, nil
+}
+
+func TestCleanupRemovesOnlyLabelledContainers(t *testing.T) {
+	fake := &cleanupDocker{ids: "abc123\ndef456\n"}
+
+	removed, err := (&Docker{exec: fake.exec}).Cleanup(context.Background())
+
+	if err != nil || removed != 2 {
+		t.Fatalf("removed = %d, err = %v", removed, err)
+	}
+	if got := strings.Join(fake.calls[0], " "); got != "ps --all --quiet --filter label=vajra.sandbox=1" {
+		t.Fatalf("list call = %q", got)
+	}
+	if got := strings.Join(fake.calls[1], " "); got != "rm --force abc123 def456" {
+		t.Fatalf("remove call = %q", got)
+	}
+
+	none := &cleanupDocker{}
+	if removed, err := (&Docker{exec: none.exec}).Cleanup(context.Background()); err != nil || removed != 0 || len(none.calls) != 1 {
+		t.Fatalf("nothing to remove: removed = %d, err = %v, calls = %d", removed, err, len(none.calls))
+	}
+	for name, fake := range map[string]*cleanupDocker{"list fails": {psCode: 1}, "remove fails": {ids: "abc", rmCode: 1}} {
+		if _, err := (&Docker{exec: fake.exec}).Cleanup(context.Background()); err == nil {
+			t.Errorf("%s: Cleanup succeeded", name)
+		}
+	}
+}

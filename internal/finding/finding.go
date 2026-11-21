@@ -159,6 +159,9 @@ type Finding struct {
 	Evidence Evidence  `json:"evidence"`
 	Status   Status    `json:"status"`
 	Verdicts []Verdict `json:"verdicts,omitempty"`
+	// CorroboratedBy lists findings of the other kind (code for a live one,
+	// live for a code one) that show the same weakness on the same service.
+	CorroboratedBy []string `json:"corroborated_by,omitempty"`
 }
 
 // StableID derives an ID from what identifies a finding, so the same issue
