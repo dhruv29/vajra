@@ -345,3 +345,53 @@ func TestReportsOverwriteAnExistingFilePrivately(t *testing.T) {
 		t.Fatalf("mode = %v; an existing world-readable file must be tightened", info.Mode().Perm())
 	}
 }
+
+func TestTheAccessTokenSurvivesARestartAndIsPrivate(t *testing.T) {
+	data := t.TempDir()
+
+	first, err := sessionToken(data)
+	if err != nil || len(first) != 64 {
+		t.Fatalf("token = %q, err = %v", first, err)
+	}
+	second, _ := sessionToken(data)
+	if second != first {
+		t.Fatal("a restart changed the token, which signs every open tab out")
+	}
+	path := filepath.Join(data, tokenFileName)
+	if info, _ := os.Stat(path); info.Mode().Perm() != 0o600 {
+		t.Fatalf("token file mode = %v", info.Mode().Perm())
+	}
+	if err := os.WriteFile(path, []byte("short\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	replaced, _ := sessionToken(data)
+	if len(replaced) != 64 || replaced == first {
+		t.Fatalf("a damaged token file was reused: %q", replaced)
+	}
+	if info, _ := os.Stat(path); info.Mode().Perm() != 0o600 {
+		t.Fatalf("token file mode after rewrite = %v", info.Mode().Perm())
+	}
+}
+
+func TestServeCanOpenTheBrowserItself(t *testing.T) {
+	opened := make(chan string, 1)
+	original := launchBrowser
+	launchBrowser = func(link string) error { opened <- link; return nil }
+	defer func() { launchBrowser = original }()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan int, 1)
+	go func() {
+		done <- run(ctx, []string{"serve", "-data", t.TempDir(), "-listen", "127.0.0.1:0", "-open"}, &bytes.Buffer{}, &lockedBuffer{})
+	}()
+
+	select {
+	case link := <-opened:
+		if !strings.HasPrefix(link, "http://127.0.0.1:") || !strings.Contains(link, "/#token=") {
+			t.Fatalf("opened %q", link)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the browser was not opened")
+	}
+	cancel()
+	<-done
+}

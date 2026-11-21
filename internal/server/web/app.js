@@ -607,16 +607,33 @@ async function render() {
     notify("");
   } catch (error) {
     focusDetailNext = false;
-    notify(error.status === 401
-      ? "This session has no valid access token. Open the link that vajra serve printed."
-      : "Could not load: " + error.message);
+    if (error.status === 401) {
+      // The token is no longer accepted. Forget it and show nothing that
+      // could be mistaken for an empty result.
+      sessionStorage.removeItem(TOKEN_KEY);
+      hideAll();
+      notify(SIGNED_OUT);
+      return;
+    }
+    notify("Could not load: " + error.message);
   }
+}
+
+const SIGNED_OUT = "This tab is not signed in. Open the link that vajra serve printed, or start it with -open; the link carries the access token.";
+
+/** Hide every panel that shows run data. */
+function hideAll() {
+  for (const id of ["overview", "workbench", "reach", "exports", "chains", "activity", "kinds"]) {
+    $(id).hidden = true;
+  }
+  $("runs").replaceChildren();
 }
 
 function start() {
   token = takeToken(readState().params);
   if (!token) {
-    notify("Open the link that vajra serve printed: it carries the access token for this session.");
+    hideAll();
+    notify(SIGNED_OUT);
     return;
   }
   for (const button of $("exports").querySelectorAll("button")) {

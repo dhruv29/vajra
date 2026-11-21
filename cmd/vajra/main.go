@@ -11,7 +11,10 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"os/signal"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"syscall"
 	"time"
@@ -425,6 +428,7 @@ func runServe(ctx context.Context, args []string, stderr io.Writer) error {
 	flags.SetOutput(stderr)
 	dataDir := flags.String("data", "", "data directory (required)")
 	listen := flags.String("listen", "127.0.0.1:8700", "loopback address to listen on")
+	openBrowser := flags.Bool("open", false, "open the interface in the default browser")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -438,7 +442,7 @@ func runServe(ctx context.Context, args []string, stderr io.Writer) error {
 	if err != nil {
 		return err
 	}
-	token, err := server.NewToken()
+	token, err := sessionToken(*dataDir)
 	if err != nil {
 		return err
 	}
@@ -457,7 +461,13 @@ func runServe(ctx context.Context, args []string, stderr io.Writer) error {
 		listener.Close()
 		return err
 	}
-	fmt.Fprintf(stderr, "vajra: open http://%s/#token=%s\n", listener.Addr(), token)
+	link := fmt.Sprintf("http://%s/#token=%s", listener.Addr(), token)
+	fmt.Fprintf(stderr, "vajra: open %s\n", link)
+	if *openBrowser {
+		if err := launchBrowser(link); err != nil {
+			fmt.Fprintf(stderr, "vajra: could not open a browser (%v); open the link above yourself\n", err)
+		}
+	}
 	return serveUntilDone(ctx, listener, handler)
 }
 
@@ -522,4 +532,38 @@ func runProbe(ctx context.Context, args []string, stdin io.Reader, stdout, stder
 		return errors.New("-proxy is required")
 	}
 	return probe.Run(ctx, *proxy, stdin, stdout)
+}
+
+// tokenFileName holds the interface's access token inside the data directory.
+const tokenFileName = ".serve-token"
+
+// sessionToken returns the access token for a data directory, creating it on
+// first use. Keeping it with the data means a browser tab stays signed in when
+// the server is restarted, and anyone who can read the token could already
+// read the runs beside it.
+func sessionToken(dataDir string) (string, error) {
+	path := filepath.Join(dataDir, tokenFileName)
+	if raw, err := os.ReadFile(path); err == nil {
+		if token := strings.TrimSpace(string(raw)); len(token) >= minTokenLength {
+			return token, os.Chmod(path, reportFileMode)
+		}
+	}
+	token, err := server.NewToken()
+	if err != nil {
+		return "", err
+	}
+	return token, writePrivate(path, []byte(token+"\n"))
+}
+
+// minTokenLength rejects a token file that was truncated or edited by hand.
+const minTokenLength = 32
+
+// launchBrowser opens a URL with the platform's opener. It is replaced in
+// tests, which must not open windows.
+var launchBrowser = func(link string) error {
+	opener := "xdg-open"
+	if runtime.GOOS == "darwin" {
+		opener = "open"
+	}
+	return exec.Command(opener, link).Start()
 }
