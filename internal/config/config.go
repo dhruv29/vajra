@@ -14,6 +14,7 @@ import (
 
 	"github.com/dhruv29/vajra/internal/budget"
 	"github.com/dhruv29/vajra/internal/scope"
+	"github.com/dhruv29/vajra/internal/topology"
 	"github.com/dhruv29/vajra/internal/verify"
 )
 
@@ -74,6 +75,9 @@ type Config struct {
 	Nuclei        Nuclei        `json:"nuclei"`
 	Verify        Verify        `json:"verify"`
 	Refuter       Refuter       `json:"refuter"`
+	// Topology is the operator's description of what the targets connect to.
+	// It is optional and feeds the blast-radius estimate.
+	Topology topology.Declaration `json:"topology"`
 }
 
 // Load reads and validates the configuration at path.
@@ -144,6 +148,9 @@ func (c Config) validate() (*scope.Policy, error) {
 	}
 	if c.Refuter.Provider != RefuterAnthropic && c.Refuter.Provider != RefuterNone {
 		return nil, fmt.Errorf("config: refuter.provider %q is not supported", c.Refuter.Provider)
+	}
+	if err := c.Topology.Validate(); err != nil {
+		return nil, fmt.Errorf("config: %w", err)
 	}
 	return policy, nil
 }

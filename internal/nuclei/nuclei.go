@@ -37,8 +37,12 @@ var templateIDPattern = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.-]*$`)
 type record struct {
 	TemplateID string `json:"template-id"`
 	Info       struct {
-		Name     string `json:"name"`
-		Severity string `json:"severity"`
+		Name           string     `json:"name"`
+		Severity       string     `json:"severity"`
+		Tags           stringList `json:"tags"`
+		Classification struct {
+			CWE stringList `json:"cwe-id"`
+		} `json:"classification"`
 	} `json:"info"`
 	Host        string   `json:"host"`
 	MatchedAt   string   `json:"matched-at"`
@@ -46,6 +50,29 @@ type record struct {
 	Extracted   []string `json:"extracted-results"`
 	Request     string   `json:"request"`
 	Response    string   `json:"response"`
+}
+
+// stringList accepts a JSON array of strings or one comma-separated string,
+// because scanner versions differ in how they write lists.
+type stringList []string
+
+func (l *stringList) UnmarshalJSON(raw []byte) error {
+	var many []string
+	if json.Unmarshal(raw, &many) != nil {
+		var one string
+		if json.Unmarshal(raw, &one) != nil {
+			return nil // an unexpected shape is ignored, not fatal
+		}
+		many = strings.Split(one, ",")
+	}
+	out := make([]string, 0, len(many))
+	for _, item := range many {
+		if item = strings.ToLower(strings.TrimSpace(item)); item != "" {
+			out = append(out, item)
+		}
+	}
+	*l = out
+	return nil
 }
 
 // Parse reads nuclei JSONL output. Lines that are not valid results are
@@ -87,6 +114,8 @@ func (rec record) toFinding() finding.Finding {
 		Title:    title,
 		Severity: finding.ParseSeverity(rec.Info.Severity),
 		Target:   target,
+		Tags:     rec.Info.Tags,
+		CWE:      rec.Info.Classification.CWE,
 		Status:   finding.Candidate,
 		Evidence: finding.Evidence{
 			Request:   rec.Request,

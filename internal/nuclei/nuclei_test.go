@@ -53,6 +53,27 @@ func TestParseReadsResultsAndSkipsJunk(t *testing.T) {
 	}
 }
 
+func TestParseReadsTagsAndCWEInEitherShape(t *testing.T) {
+	output := `{"template-id":"a","info":{"tags":["Config"," git ",""],"classification":{"cwe-id":["CWE-200"]}}}
+{"template-id":"b","info":{"tags":"sqli, injection","classification":{"cwe-id":"cwe-89"}}}
+{"template-id":"c","info":{"tags":42,"classification":{"cwe-id":null}}}
+`
+	findings, skipped, err := Parse(strings.NewReader(output))
+
+	if err != nil || skipped != 0 || len(findings) != 3 {
+		t.Fatalf("findings = %d, skipped = %d, err = %v", len(findings), skipped, err)
+	}
+	if !slices.Equal(findings[0].Tags, []string{"config", "git"}) || !slices.Equal(findings[0].CWE, []string{"cwe-200"}) {
+		t.Errorf("array shape: tags = %v, cwe = %v", findings[0].Tags, findings[0].CWE)
+	}
+	if !slices.Equal(findings[1].Tags, []string{"sqli", "injection"}) || !slices.Equal(findings[1].CWE, []string{"cwe-89"}) {
+		t.Errorf("string shape: tags = %v, cwe = %v", findings[1].Tags, findings[1].CWE)
+	}
+	if len(findings[2].Tags) != 0 || len(findings[2].CWE) != 0 {
+		t.Errorf("unexpected shape: tags = %v, cwe = %v", findings[2].Tags, findings[2].CWE)
+	}
+}
+
 func TestParseReportsOversizedLines(t *testing.T) {
 	_, _, err := Parse(strings.NewReader(strings.Repeat("x", maxLineBytes+1)))
 	if err == nil {

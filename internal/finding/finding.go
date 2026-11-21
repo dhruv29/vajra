@@ -97,12 +97,15 @@ type Verdict struct {
 
 // Finding is one reported issue.
 type Finding struct {
-	ID       string    `json:"id"`
-	Source   string    `json:"source"`
-	RuleID   string    `json:"rule_id"`
-	Title    string    `json:"title"`
-	Severity Severity  `json:"severity"`
-	Target   string    `json:"target"`
+	ID       string   `json:"id"`
+	Source   string   `json:"source"`
+	RuleID   string   `json:"rule_id"`
+	Title    string   `json:"title"`
+	Severity Severity `json:"severity"`
+	Target   string   `json:"target"`
+	// Tags and CWE are the scanner's own classification of the rule.
+	Tags     []string  `json:"tags,omitempty"`
+	CWE      []string  `json:"cwe,omitempty"`
 	Evidence Evidence  `json:"evidence"`
 	Status   Status    `json:"status"`
 	Verdicts []Verdict `json:"verdicts,omitempty"`

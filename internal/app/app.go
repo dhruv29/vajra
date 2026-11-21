@@ -17,6 +17,7 @@ import (
 	"github.com/dhruv29/vajra/internal/egress"
 	"github.com/dhruv29/vajra/internal/finding"
 	"github.com/dhruv29/vajra/internal/nuclei"
+	"github.com/dhruv29/vajra/internal/record"
 	"github.com/dhruv29/vajra/internal/refute"
 	"github.com/dhruv29/vajra/internal/sandbox"
 	"github.com/dhruv29/vajra/internal/scope"
@@ -38,24 +39,8 @@ type Deps struct {
 	ModelClient  *http.Client
 }
 
-// BudgetReport shows the caps of a run and what it spent.
-type BudgetReport struct {
-	Limits budget.Limits `json:"limits"`
-	Usage  budget.Usage  `json:"usage"`
-}
-
-// Report is the result of a run.
-type Report struct {
-	Tool          string                 `json:"tool"`
-	GeneratedAt   time.Time              `json:"generated_at"`
-	Authorization config.Authorization   `json:"authorization"`
-	Targets       []string               `json:"targets"`
-	Scope         scope.Config           `json:"scope"`
-	Budget        BudgetReport           `json:"budget"`
-	Refuter       string                 `json:"refuter"`
-	Summary       map[finding.Status]int `json:"summary"`
-	Findings      []finding.Finding      `json:"findings"`
-}
+// Report is the verified output of a run.
+type Report = record.Report
 
 // run holds the assembled parts of one run.
 type run struct {
@@ -154,10 +139,10 @@ func (r *run) verify(ctx context.Context, candidates []finding.Finding) Report {
 	return Report{
 		Tool:          "vajra",
 		GeneratedAt:   r.deps.Now().UTC(),
-		Authorization: r.cfg.Authorization,
+		Authorization: record.Authorization(r.cfg.Authorization),
 		Targets:       r.cfg.Targets,
 		Scope:         r.cfg.Scope,
-		Budget:        BudgetReport{Limits: r.budget.Limits(), Usage: r.budget.Usage()},
+		Budget:        record.BudgetReport{Limits: r.budget.Limits(), Usage: r.budget.Usage()},
 		Refuter:       r.cfg.Refuter.Provider,
 		Summary:       summary,
 		Findings:      verified,

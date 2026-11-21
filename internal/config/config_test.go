@@ -71,8 +71,11 @@ func TestParseRejectsIncompleteOrUnsafeConfigs(t *testing.T) {
 		"too many attempts":         func(m map[string]any) { m["verify"] = map[string]any{"reproduce_attempts": 9} },
 		"negative attempts":         func(m map[string]any) { m["verify"] = map[string]any{"reproduce_attempts": -1} },
 		"unknown refuter":           func(m map[string]any) { m["refuter"] = map[string]any{"provider": "magic"} },
-		"misspelt field":            func(m map[string]any) { m["scop"] = map[string]any{} },
-		"api key in the file":       func(m map[string]any) { m["refuter"] = map[string]any{"provider": "anthropic", "api_key": "sk-x"} },
+		"bad topology": func(m map[string]any) {
+			m["topology"] = map[string]any{"assets": []map[string]any{{"id": "db", "kind": "spaceship", "name": "x"}}}
+		},
+		"misspelt field":      func(m map[string]any) { m["scop"] = map[string]any{} },
+		"api key in the file": func(m map[string]any) { m["refuter"] = map[string]any{"provider": "anthropic", "api_key": "sk-x"} },
 	}
 	for name, mutate := range cases {
 		t.Run(name, func(t *testing.T) {
