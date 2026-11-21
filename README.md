@@ -269,6 +269,7 @@ not a measurement.
 |---|---|
 | `vajra scan -config FILE` | Run every enabled check, then verify each result |
 | `vajra verify -config FILE -in OUTPUT.jsonl` | Verify nuclei output saved earlier |
+| `vajra verify -config run.json -sarif report.sarif` | Triage another tool's report (CodeQL, Semgrep, Snyk, Trivy, an AI reviewer: anything that writes SARIF 2.1.0) against the source tree in `source.root`. A result is refuted, with the reason, when the file it cites does not exist, the line is past the end of the file, the code it quotes is not there, or it points at a blank line or a comment. What survives is shown with the code Vajra read, not what the tool quoted, and goes to review like any other finding |
 | `vajra gate -config FILE [-socks ADDR]` | Run the egress gate (HTTP proxy, optionally SOCKS5 for raw TCP tools) |
 | `vajra pause`, `resume`, `stop` `-data DIR` | Pause, continue or end a running exploration |
 | `vajra cleanup` | Remove sandbox containers left by an interrupted run |

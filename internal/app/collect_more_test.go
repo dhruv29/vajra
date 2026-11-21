@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -844,5 +845,81 @@ func TestCrawledFormsThatSubmitWithGetBecomeAddressesToTest(t *testing.T) {
 	want := []string{"https://app.test/b?x=1", "https://app.test/find?q=1&sort=1"}
 	if !slices.Equal(got, want) {
 		t.Fatalf("addresses = %v; want %v (forms that post are never submitted)", got, want)
+	}
+}
+
+// otherToolsReport is a SARIF report with three claims about one file: one
+// that is true, one about a file that does not exist, and one quoting code
+// that is not in the file.
+const otherToolsReport = `{"version":"2.1.0","runs":[{"tool":{"driver":{"name":"OtherScanner","rules":[{"id":"sql-injection","properties":{"security-severity":"8.8","tags":["external/cwe/cwe-89"]}}]}},
+ "results":[
+  {"ruleId":"sql-injection","level":"error","message":{"text":"query built from input"},"locations":[{"physicalLocation":{"artifactLocation":{"uri":"app.py"},"region":{"startLine":2,"snippet":{"text":"db.execute(\"SELECT \" + name)"}}}}]},
+  {"ruleId":"sql-injection","level":"error","message":{"text":"query built from input"},"locations":[{"physicalLocation":{"artifactLocation":{"uri":"gone.py"},"region":{"startLine":10}}}]},
+  {"ruleId":"sql-injection","level":"error","message":{"text":"query built from input"},"locations":[{"physicalLocation":{"artifactLocation":{"uri":"app.py"},"region":{"startLine":1,"snippet":{"text":"os.system(user_input)"}}}}]},
+  {"ruleId":"sql-injection","level":"error","message":{"text":"escapes the project"},"locations":[{"physicalLocation":{"artifactLocation":{"uri":"../../etc/passwd"},"region":{"startLine":1}}}]}
+ ]}]}`
+
+func TestAnotherToolsReportIsCheckedAgainstTheCode(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "app.py"), []byte("def find(name):\n    db.execute(\"SELECT \" + name)\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, policy := labConfig(t, "none", func(m map[string]any) {
+		m["source"] = map[string]any{"root": root, "serves": "https://app.test", "secrets": true}
+	})
+
+	report, err := VerifyReport(context.Background(), cfg, policy, labDeps(&labRunner{}, "", nil), strings.NewReader(otherToolsReport))
+
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(report.Findings) != 3 {
+		t.Fatalf("findings = %d; want three (the path outside the project is dropped)", len(report.Findings))
+	}
+	byReason := map[finding.Status][]string{}
+	for _, f := range report.Findings {
+		if f.Source != "sarif:otherscanner" {
+			t.Errorf("source = %q", f.Source)
+		}
+		last := f.Verdicts[len(f.Verdicts)-1]
+		byReason[f.Status] = append(byReason[f.Status], last.Reason)
+		if f.Status != finding.Refuted && !strings.Contains(f.Evidence.Code, "db.execute") {
+			t.Errorf("the surviving finding shows %q; want the code Vajra read", f.Evidence.Code)
+		}
+	}
+	if len(byReason[finding.Refuted]) != 2 || len(byReason[finding.Unconfirmed]) != 1 {
+		t.Fatalf("statuses = %v; want two refuted and one left for review", byReason)
+	}
+	for _, reason := range byReason[finding.Refuted] {
+		if !strings.Contains(reason, "the report does not match the code") {
+			t.Errorf("refuted with %q; want the mismatch explained", reason)
+		}
+	}
+	notes := strings.Join(report.Activity.Notes, "\n")
+	if !strings.Contains(notes, "3 usable result(s)") || !strings.Contains(notes, "1 result(s) cited a path outside the project") {
+		t.Fatalf("notes = %q", notes)
+	}
+}
+
+func TestTriagingAReportNeedsTheSourceTree(t *testing.T) {
+	cfg, policy := labConfig(t, "none", nil)
+
+	_, err := VerifyReport(context.Background(), cfg, policy, labDeps(&labRunner{}, "", nil), strings.NewReader(otherToolsReport))
+
+	if err == nil || !strings.Contains(err.Error(), "source.root") {
+		t.Fatalf("err = %v; want the missing source tree named", err)
+	}
+}
+
+func TestAMalformedReportIsAnError(t *testing.T) {
+	root := t.TempDir()
+	cfg, policy := labConfig(t, "none", func(m map[string]any) {
+		m["source"] = map[string]any{"root": root, "serves": "https://app.test", "secrets": true}
+	})
+
+	_, err := VerifyReport(context.Background(), cfg, policy, labDeps(&labRunner{}, "", nil), strings.NewReader("{not sarif"))
+
+	if err == nil || !strings.Contains(err.Error(), "sarif:") {
+		t.Fatalf("err = %v; want the report refused", err)
 	}
 }

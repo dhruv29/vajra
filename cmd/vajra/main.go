@@ -49,7 +49,7 @@ const usage = `vajra: security testing that proves its findings
 Usage:
   vajra scan   -config run.json [-out report.json] [-data DIR] [-gate-audit FILE] [-fail-on-confirmed]
                [-baseline RUN] [-fail-on-new] [-notify]
-  vajra verify -config run.json -in nuclei.jsonl [-out report.json] [-data DIR] [-gate-audit FILE] [-fail-on-confirmed]
+  vajra verify -config run.json (-in nuclei.jsonl | -sarif report.sarif) [-out report.json] [-data DIR] [-gate-audit FILE] [-fail-on-confirmed]
                [-baseline RUN] [-fail-on-new] [-notify]
   vajra gate   -config run.json [-listen :3128] [-socks ADDR] [-audit audit.jsonl]
   vajra stop   -data DIR
@@ -192,6 +192,7 @@ func runReport(ctx context.Context, command string, args []string, stdin io.Read
 	flags.SetOutput(stderr)
 	configPath := flags.String("config", "", "path to the run configuration (required)")
 	inPath := flags.String("in", "", "scanner output to verify (verify only)")
+	sarifPath := flags.String("sarif", "", "another tool's SARIF report to triage against the source tree (verify only; instead of -in)")
 	outPath := flags.String("out", "", "write the report here instead of standard output")
 	failOnConfirmed := flags.Bool("fail-on-confirmed", false, "exit with status 3 when any finding is confirmed")
 	dataDir := flags.String("data", "", "also save the run in this data directory")
@@ -222,15 +223,19 @@ func runReport(ctx context.Context, command string, args []string, stdin io.Read
 
 	var report app.Report
 	if command == "verify" {
-		if *inPath == "" {
-			return exitUsage, errors.New("-in is required for verify")
+		if (*inPath == "") == (*sarifPath == "") {
+			return exitUsage, errors.New("verify needs exactly one of -in and -sarif")
 		}
-		in, err := os.Open(*inPath)
+		in, err := os.Open(*inPath + *sarifPath)
 		if err != nil {
 			return exitError, err
 		}
 		defer in.Close()
-		report, err = app.VerifyOutput(ctx, cfg, policy, deps, in)
+		verifyInput := app.VerifyOutput
+		if *sarifPath != "" {
+			verifyInput = app.VerifyReport
+		}
+		report, err = verifyInput(ctx, cfg, policy, deps, in)
 		if err != nil {
 			return exitError, err
 		}

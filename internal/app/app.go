@@ -23,6 +23,7 @@ import (
 	"github.com/dhruv29/vajra/internal/record"
 	"github.com/dhruv29/vajra/internal/report"
 	"github.com/dhruv29/vajra/internal/sandbox"
+	"github.com/dhruv29/vajra/internal/sarif"
 	"github.com/dhruv29/vajra/internal/scope"
 	"github.com/dhruv29/vajra/internal/store"
 	"github.com/dhruv29/vajra/internal/verify"
@@ -94,6 +95,50 @@ func (r *run) finish(ctx context.Context, report Report) (Report, error) {
 	return report, nil
 }
 
+// VerifyReport triages another tool's SARIF report. Each result is a claim
+// about the source tree: it is checked against the code it cites, shown with
+// the code Vajra read rather than what the tool quoted, and then reviewed
+// like any other finding.
+func VerifyReport(ctx context.Context, cfg config.Config, policy *scope.Policy, deps Deps, in io.Reader) (Report, error) {
+	r, err := assemble(cfg, policy, deps)
+	if err != nil {
+		return Report{}, err
+	}
+	if r.reports == nil {
+		return Report{}, errors.New("app: triaging a report needs source.root in the configuration, to check the report against the code")
+	}
+	candidates, stats, err := sarif.ParseWithStats(in, sarif.Options{Root: cfg.Source.Root})
+	if err != nil {
+		return Report{}, err
+	}
+	r.noteReport(len(candidates), stats)
+	for i, f := range candidates {
+		// A report that does not match the code has no code to show; the
+		// claim stage says why, so the error here is not repeated.
+		if withCode, err := r.reports.Context(f); err == nil {
+			candidates[i] = withCode
+		}
+	}
+	return r.finish(ctx, r.verify(ctx, r.redact(candidates)))
+}
+
+// noteReport says how much of the report was taken and what was left out.
+func (r *run) noteReport(kept int, stats sarif.Stats) {
+	r.note("The report held %d usable result(s).", kept)
+	if stats.Excluded > 0 {
+		r.note("%d result(s) were already suppressed, passing or absent in the report and were left out.", stats.Excluded)
+	}
+	if stats.Unsafe > 0 {
+		r.note("%d result(s) cited a path outside the project and were dropped.", stats.Unsafe)
+	}
+	if stats.Duplicate > 0 {
+		r.note("%d result(s) repeated another at the same rule and line and were merged.", stats.Duplicate)
+	}
+	if dropped := stats.Unusable + stats.OverCap; dropped > 0 {
+		r.note("%d result(s) could not be used: no rule, file or line, or over the limit.", dropped)
+	}
+}
+
 // VerifyOutput verifies nuclei output produced earlier, read from in.
 func VerifyOutput(ctx context.Context, cfg config.Config, policy *scope.Policy, deps Deps, in io.Reader) (Report, error) {
 	r, err := assemble(cfg, policy, deps)
@@ -118,6 +163,9 @@ func VerifyOutput(ctx context.Context, cfg config.Config, policy *scope.Policy, 
 
 // pipelineFor picks the verification pipeline for a finding's kind.
 func (r *run) pipelineFor(f finding.Finding) *verify.Pipeline {
+	if sarif.IsSource(f.Source) {
+		return r.reportPipeline
+	}
 	switch f.Kind {
 	case finding.Static:
 		return r.staticPipeline

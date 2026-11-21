@@ -59,3 +59,33 @@ func TestRecordingNeedsItsInputs(t *testing.T) {
 		})
 	}
 }
+
+func TestVerifyTakesExactlyOneKindOfInput(t *testing.T) {
+	cfg := writeFile(t, "run.json", validConfig)
+	input := writeFile(t, "in.txt", "")
+	cases := map[string][]string{
+		"neither": {"verify", "-config", cfg},
+		"both":    {"verify", "-config", cfg, "-in", input, "-sarif", input},
+	}
+	for name, args := range cases {
+		t.Run(name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			code := runWith(context.Background(), args, nil, &stdout, &stderr)
+			if code == 0 || !strings.Contains(stderr.String(), "exactly one of -in and -sarif") {
+				t.Fatalf("exit %d, stderr %q; want a usage error", code, stderr.String())
+			}
+		})
+	}
+}
+
+func TestVerifyRefusesAReportWithoutASourceTree(t *testing.T) {
+	cfg := writeFile(t, "run.json", validConfig)
+	report := writeFile(t, "report.sarif", `{"version":"2.1.0","runs":[]}`)
+	var stdout, stderr bytes.Buffer
+
+	code := runWith(context.Background(), []string{"verify", "-config", cfg, "-sarif", report}, nil, &stdout, &stderr)
+
+	if code == 0 || !strings.Contains(stderr.String(), "source.root") {
+		t.Fatalf("exit %d, stderr %q; want the missing source tree named", code, stderr.String())
+	}
+}

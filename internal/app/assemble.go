@@ -27,6 +27,7 @@ import (
 	"github.com/dhruv29/vajra/internal/record"
 	"github.com/dhruv29/vajra/internal/refute"
 	"github.com/dhruv29/vajra/internal/sandbox"
+	"github.com/dhruv29/vajra/internal/sarif"
 	"github.com/dhruv29/vajra/internal/scope"
 	"github.com/dhruv29/vajra/internal/secrets"
 	"github.com/dhruv29/vajra/internal/semgrep"
@@ -43,6 +44,10 @@ type run struct {
 	cfg    config.Config
 	deps   Deps
 	policy *scope.Policy
+	// reports checks other tools' reports against the source tree, and
+	// reportPipeline verifies them; both are nil without a source tree.
+	reports        *sarif.Checker
+	reportPipeline *verify.Pipeline
 	// injector runs the built-in active checks; nil when they are off.
 	injector *inject.Checker
 	// paramURLs are addresses with query parameters seen during discovery.
@@ -474,6 +479,23 @@ func (r *run) addSource(refuteStage verify.RefuteStage) error {
 	if err != nil {
 		return err
 	}
+	// Reports from other tools are claims about this code. They get their own
+	// pipeline: the claim is checked against the source tree first, so a
+	// report that cites code which is not there is refuted with the reason,
+	// not merely left unconfirmed for lacking evidence.
+	checker, err := sarif.NewChecker(src.Root)
+	if err != nil {
+		return err
+	}
+	r.reports = checker
+	r.reportPipeline, err = verify.NewPipeline(r.deps.Now,
+		claimStage{checker: checker},
+		verify.SourceScopeStage{},
+		refuteStage,
+	)
+	if err != nil {
+		return err
+	}
 	if src.Dependencies != nil && src.Dependencies.OSV {
 		r.osv = &osvReproducer{
 			client:   osv.NewClient(osv.Options{BaseURL: r.deps.OSVBaseURL, HTTP: r.deps.ModelClient}),
@@ -530,4 +552,26 @@ func (o *osvReproducer) Reproduce(ctx context.Context, f finding.Finding) (bool,
 		}
 	}
 	return false, nil
+}
+
+// claimStage checks another tool's report against the code it cites. A
+// report whose file is missing, whose line is past the end of the file,
+// whose quoted code is not there, or which points at a blank line or a
+// comment is refuted, and the reason says which.
+type claimStage struct {
+	checker *sarif.Checker
+}
+
+func (claimStage) Name() string               { return "reproduce" }
+func (claimStage) FailStatus() finding.Status { return finding.Refuted }
+
+func (s claimStage) Check(ctx context.Context, f finding.Finding) (finding.Outcome, string) {
+	assessment, err := s.checker.Assess(ctx, f)
+	if err != nil {
+		return finding.Inconclusive, fmt.Sprintf("the cited code could not be read: %v", err)
+	}
+	if !assessment.Holds {
+		return finding.Fail, "the report does not match the code: " + assessment.Detail
+	}
+	return finding.Pass, "the cited code exists and matches the report"
 }
